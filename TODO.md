@@ -257,6 +257,24 @@
    smoke `[14/14]` 用 `utimesSync` 把 mtime 钉到整秒时间戳，分别证明"mtime 不变不重读""mtime 前进必须见新值"
    "缺失只 warn 一次""空文件同样告警""告警里不含 sk-"。本段临时摘掉宿主 `DS_API_KEY` 并在 finally 复原，保证与调用环境无关。
 
+**真机闭环复验（2026-10-20 20:43，`test/live_e2e.mjs` detach 模式）**：先把旧后端按树回收停掉
+（`taskkill` 连带收掉 conhost，Chrome 13136 不在我们树里 → 保留，登录态不丢），再让插件按新规则重拉：
+
+```
+[debug] 子进程环境变量（只记名不记值）: APPDATA, COMSPEC, DS_TOOLS, DS_TOOL_REASONING, HOME, HOMEDRIVE,
+        HOMEPATH, LANG, LC_ALL, LOCALAPPDATA, PATH, PATHEXT, PORT, PROGRAMFILES, PROGRAMFILES(X86),
+        PROGRAMW6432, SYSTEMDRIVE, SYSTEMROOT, TEMP, TMP, USERPROFILE, WINDIR
+[info]  已拉起后端 PID=11280 模式=detach
+[debug] 后端自述 version=0.1.0 toolReasoning=clean toolCalls=text → mismatches=0
+[debug] model=deepseek-web-thinking ms=3258 ttft=2815ms reasonChars=122 contentChars=0
+        toolCalls=1 usage=0/671 conversation=efa7d9b9-… outcome=tool-calls
+```
+
+要点：白名单下真实后端**照常干活**——复用 `data/auth.json` 登录态（日志明写"无需打开浏览器"）、
+连回 CDP 9333、`pwsh` 调用参数完整、28 段推理实时下发、`usage` 单块且 671 为上游真实计数。
+`DS_API_KEY` 没透传，后端回落到 `data/.api-key`（横幅里只打 `{"count":1,"source":"file"}`，不含密钥值），
+与插件侧解析的是同一份，认证一致。脚本退出后 `ppid=20976 已退出 → 后端独立存活`，detach 语义成立。
+
 **P2 剩下的**：P2-4（绝对路径硬编码三处）、P2-6（改配置要重启）。P2-1/P2-8 本批已修，P2-5 属有意设计已关闭。
 
 
