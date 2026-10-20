@@ -45,10 +45,14 @@
    想强行复用旧后端就把 `strictBackend` 设为 `false`（降级为告警），或用 `requiredCapabilities` / `minBackendVersion` 精确声明依赖。
 19. **配置改动不必重启客户端**：适配器不再在加载时固化配置快照，而是每轮请求（`prepareCall`）取当代配置；
     只影响请求的项（如 `toolDescriptionMaxChars`、`defaultMaxTokens`）改完下一轮即生效；
-    影响后端进程的项（`baseUrl`、`serverDir`、`toolReasoning`、`tools`、`logFile`、`detach` 等）变更时
+    影响后端进程的项（`baseUrl`、`serverDir`、`toolReasoning`、`tools`、`streamContent`、`logFile`、`detach` 等）变更时
     自动回收旧后端管理器并重建（会打一条 info/warn）。每代请求把自己那一份配置与管理器绑死，
     避免"准备时用新值、派发时又混进旧一代"。`apply()` 返回适配器句柄，卸载时回收懒建的管理器。
 20. **不污染工具列表**：遵循 DSH 设计哲学，不导出任何 Action 工具。
+21. **正文也能实时出字（可选）**：`streamContent: 'live'` 让后端把工具回合的正文也过一遍协议闸门再下发
+    （闸门只扣住"可能是标记开头"的尾巴，已发出去的字绝不回收），长参数生成时不再只见思考气泡。
+    默认 `buffered` 保持"正文只由权威解析决定"的最保真语义；两者都靠同一处实现，插件侧不重演判定逻辑。
+    代价写进 `docs/troubleshooting.md`：被判无效而重试的那轮，重来的答案只追加不上屏。
 
 ---
 
@@ -90,6 +94,7 @@ cd C:\Users\Admin\DeepSeek_Harness\dsh-client-config\plugins\dsh-deepseek-web-ap
         toolDescriptionMaxChars: 0  # 0 = 工具描述完整下发；>0 才按字符预算裁剪
         toolReasoning: 'clean'   # 注入后端 DS_TOOL_REASONING：clean 才能实时流式深度思考
         tools: 'text'            # 注入后端 DS_TOOLS：text = JSON 协议，native = 网页标记协议
+        streamContent: 'buffered' # 注入后端 DS_STREAM_CONTENT：live = 工具回合正文也实时出字
         healthTtlMs: 30000       # /health 缓存，避免每步都探活；0 = 每次都探活
         streamIdleTimeoutMs: 120000  # 上游无数据的容忍上限，超时按 TIMEOUT 重试
         logFile: ''              # 填路径则后端输出落盘（>2MB 轮转 .1）
@@ -105,7 +110,7 @@ cd C:\Users\Admin\DeepSeek_Harness\dsh-client-config\plugins\dsh-deepseek-web-ap
 > 它只是告诉 DSH“单轮最多可能吐多少”，内核据此预留上下文水位。实测单轮可产出 6 万字符（约 2 万 token），
 > 所以默认值取 32768；写小了会让压缩/截断决策过于乐观。
 
-> `toolReasoning` / `tools` 只在插件**自己拉起**后端进程时生效；如果 8787 已经被别的进程占用，插件会直接复用（复用实例的环境变量由那次启动决定）。
+> `toolReasoning` / `tools` / `streamContent` 只在插件**自己拉起**后端进程时生效；如果 8787 已经被别的进程占用，插件会直接复用（复用实例的环境变量由那次启动决定），此时用后端自述的 `streamContent` 与本地配置比对并 `logger.warn`。
 
 ### 3. 同步运行时配置
 
@@ -129,6 +134,24 @@ pnpm login
 - **DeepSeek Web API (反代)** → `deepseek-web-flash`（极速）/ `deepseek-web-thinking`（深度思考）。
 
 ---
+
+## 安全约束
+
+这几条是本项目与使用者明确定下来的红线，改代码前先看一眼：
+
+1. **反代只监听回环**。`HOST` 默认 `127.0.0.1`，插件注入子进程环境时把宿主的 `HOST` 挡在白名单之外
+   （smoke `[13/18]` 钉住了这条），API Key 也就只在 `127.0.0.1:8787` 这一层起作用。不要把它变成对外监听的代理。
+2. **凭据绝不进日志与错误文本**。后端 `data/.api-key`、`DS_API_KEY`、`auth.json` 都是私密文件；
+   插件记录子进程环境变量时**只记变量名不记值**（`keys.join(', ')`），日志落盘与 `describeErrorBody`
+   也不得回显 Key/Cookie。缺 Key 时的报错只说去哪儿找，不打印值。
+3. **不要动那个嵌套的 git 仓**。`plugins/dsh-deepseek-web-api/` 是**故意的独立仓库**（防止与外层配置一并提交），
+   外层 `.gitignore` 已登记它。别删它的 `.git`、别并入外层仓、别改成 submodule。
+4. **推送只推自己的远端**。后端 `origin` 是使用者 fork（`banyeshuiwujiao/deepseek-web-api`），
+   `upstream`（`kittors/deepseek-web-api`）是第三方只读仓，**永远不要往 upstream 推**。
+5. **发布/外发类动作先确认**。发消息、上线、公开站点、`install.ps1` 之类改动系统或对外可见的操作，
+   先给出可审阅的结果再动手；本地读写与跑测试属于日常授权范围。
+6. **进程回收要成树**。托管模式 `killTreeOnDispose: true` 用 `taskkill /T /F`（POSIX 走进程组），
+   连带回收后端起的 headless Chrome；`detach: true` 时 stdio 绝不能是 pipe，否则父进程退出会让后端 EPIPE 自杀。
 
 ## 验证与测试
 
