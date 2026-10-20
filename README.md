@@ -22,7 +22,11 @@
 7. **稳定错误码与中止语义**：HTTP 状态按内核词表分流 —— 401/403 `AUTH`、402 `QUOTA`、429 `RATE_LIMIT`（透传 `Retry-After`）、400/413/422 `INVALID_REQUEST`、上下文超长 `CONTEXT_WINDOW_EXCEEDED`、5xx `SERVER`、其余 `HTTP_<status>`；只有真正值得重试的码进 `retryableCodes`，用户点“停止”一律 `ABORTED`（不进重试）。
 8. **消息保真**：历史里的 `system` / `developer` 角色照样透传（旧实现只认 `options.system`，其余静默丢弃）；工具描述默认完整下发（旧实现砍成首行，`workflow` 曾丢 81% 说明）；图片等非文本 block 会显式告警，不再变成空串。
 9. **归因头**：每个 provider HTTP 请求都带 `attributionHeaders()`（内核 helper 不可用时退化为字面量），符合 LlmAdapter 契约。
-10. **不污染工具列表**：遵循 DSH 设计哲学，不导出任何 Action 工具。
+10. **工具调用按 `index` 累积**：分片到达（同 `index` 多次追加 `arguments`）会合成一个完整调用再下发，不会产出残缺块；缺 `id` 时用自增兜底，不撞号。
+11. **空闲超时**：上游连续 `streamIdleTimeoutMs`（默认 120s）不吐字节，按可重试的 `TIMEOUT` 中止，不再无限挂着。
+12. **复用实例可辨识**：`GET /health` 现在自述 `version` 与生效中的 `toolReasoning`/`toolCalls`，插件据此比对自身配置——跑的是旧构建或开关不一致会 `logger.warn`（真机上就吃过"复用手工起的旧进程、注入的开关从未生效"的亏）。探活结果按 `healthTtlMs` 缓存，长会话不再每步探活。
+13. **每轮一行统计 + 可选日志落盘**：`logger.debug` 输出 `ttft / reasonChars / contentChars / toolCalls / usage / conversation / outcome`；配置 `logFile` 后后端子进程输出写文件（>2MB 轮转 `.1`），事后能取证。
+14. **不污染工具列表**：遵循 DSH 设计哲学，不导出任何 Action 工具。
 
 ---
 
@@ -56,6 +60,9 @@ cd C:\Users\Admin\DeepSeek_Harness\dsh-client-config\plugins\dsh-deepseek-web-ap
         toolDescriptionMaxChars: 0  # 0 = 工具描述完整下发；>0 才按字符预算裁剪
         toolReasoning: 'clean'   # 注入后端 DS_TOOL_REASONING：clean 才能实时流式深度思考
         tools: 'text'            # 注入后端 DS_TOOLS：text = JSON 协议，native = 网页标记协议
+        healthTtlMs: 30000       # /health 缓存，避免每步都探活；0 = 每次都探活
+        streamIdleTimeoutMs: 120000  # 上游无数据的容忍上限，超时按 TIMEOUT 重试
+        logFile: ''              # 填路径则后端输出落盘（>2MB 轮转 .1）
 ```
 
 > `defaultMaxTokens` 不会真的限制输出：网页端上游不接受 token 上限（反代 `docs/api.md` 已说明），

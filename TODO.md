@@ -85,7 +85,7 @@
 
 ## P1 —— 流式体验、健壮性与可观测性
 
-- [ ] **P1-1 `tool_calls` 不按 `index` 累积,依赖"后端一次给全"的隐含假设**
+- [x] **P1-1 `tool_calls` 不按 `index` 累积,依赖"后端一次给全"的隐含假设** —— 已修,见「P1 落地记录」
   证据:实测探针里后端在**单个 chunk**给出完整数组(带 `index:0`/`id`/完整 `arguments`),
   插件 `:358-377` 于是逐个开块-发增量-关块。一旦后端改成 OpenAI 标准分片(同 `index` 多次追加 `arguments`),
   插件会产出 N 个各自残缺的 tool-call 块;而 `:360` 的兜底 id `call_${Date.now().toString(36)}` 在同一毫秒内多调用会**撞号**。
@@ -104,7 +104,7 @@
   另外只查 `contentText`,**没查 `reasoningText`** —— `toolReasoning:'clean'` 下推理是原样实时下发的。
   改法:把闸门前移到 `text-delta`(可疑尾巴先扣住,确认不是标记再放行),并对 reasoning 通道同样检测。
 
-- [ ] **P1-4 每一步都 `/health` 探活,且没有请求级超时**
+- [x] **P1-4 每一步都 `/health` 探活,且没有请求级超时** —— 已修,见「P1 落地记录」
   证据:`:211` 每次 `stream()` 都 `await this.manager.ensure()`(内含 3s 超时探针),真机 13 步 = 13 次探活;
   同时 fetch 只受 DSH 的 signal 约束,上游卡死就会永久挂着(反代侧也没有 inactivity timeout)。
   改法:健康状态缓存 30s(或仅在传输失败后重新探活);加"连续 N 秒无字节 → `TIMEOUT`(可重试)"与总时长上限。
@@ -114,7 +114,7 @@
   收尾处的 `block-end`(`:399`)复用 `blockIndex` 但不自增,后续再开块会与它撞索引。
   改法:`try/finally` 统一收口;索引分配收敛成一个 `nextIndex()`。
 
-- [ ] **P1-6 `/health` 太哑:插件无法确认"在跑的是哪一套后端、哪一套配置"**
+- [x] **P1-6 `/health` 太哑:插件无法确认"在跑的是哪一套后端、哪一套配置"** —— 已修,见「P1 落地记录」
   证据:实测 `GET /health` 只返回 `{"ok":true}`。本次真机会话用的后端是**我手工起的** PID 11192
   (父进程是 shell,不是 DSH),因此插件 `spawnServer` 注入的 `DS_TOOL_REASONING`/`DS_TOOLS`(`server.js:72-74`)
   **在真机链路上从未被执行过**;会话日志也无法证明当时跑的是 clean 还是 hidden
@@ -123,7 +123,7 @@
   插件 `ensure()` 比对自己的配置,不一致就 `logger.warn`(或 `strictBackend:true` 时拒绝复用、改为重启),
   并把后端 version 与 `minBackendVersion` 对照(见 P3-3)。
 
-- [ ] **P1-7 插件侧几乎零日志,反代已经算好的诊断没被用上**
+- [x] **P1-7 插件侧几乎零日志,反代已经算好的诊断没被用上** —— 已修,见「P1 落地记录」
   证据:`ctx.logger` 只在 spawn 时用了一次(`server.js:109/122`);每轮的 ttft、chunk 数、finish_reason、
   是否重试、协议形态全都没有落日志。反代其实已经算了 `protocolShape`/`protocolTruncated`
   并在最终 chunk 带了 `conversation`(实测 `conv=4a9cdaf8-…`),插件一律忽略。
@@ -131,7 +131,7 @@
   (`ttft/chunks/reasonChars/contentChars/toolCalls/protocolShape/finish/conversation`),
   并像 `tail()` 一样保留环形缓冲,便于"跑完就能复盘"。当初那个 bug 要是有这行日志,一眼就能定位。
 
-- [ ] **P1-8 后端日志只在内存里,崩溃现场拿不到**
+- [x] **P1-8 后端日志只在内存里,崩溃现场拿不到** —— 已修(可选 `logFile`),见「P1 落地记录」
   证据:`server.js:53-57` 的 `recentLogs` 上限 50 行、只存内存,`tail()` 仅拼进启动失败的错误串;
   插件没有对外暴露任何诊断入口。
   改法:可选 `logFile` 配置(默认写到插件目录下 `logs/backend.log`,轮转),并把 `tail()` 通过一个诊断命令/工具暴露出来。
@@ -171,7 +171,7 @@
   `registerConfigurableProviders` 声明了 `settingsPath:['providers','deepseek-web-api']`,但没有订阅变更。
   改法:监听配置变更 → 重建 manager/adapter(注意别把正在跑的请求打断),或至少在文档里写明"改配置需重启"。
 
-- [ ] **P2-7 模型能力表与 thinking 判定各自为政**
+- [x] **P2-7 模型能力表与 thinking 判定各自为政** —— `resolveThinkingEnabled()` 已改为查 `KNOWN_MODELS.thinking`，只有未知模型才回退名字匹配；smoke 断言 flash/thinking/reasoner 三种判定。`effort` 档位仍只是布尔（反代只认开关），未动。
   证据:`KNOWN_MODELS` 已经有 `thinking` 字段,但 `:219-221` 用的是
   `model.includes('pro') || model.includes('reasoner')` 这种字符串猜测;
   另外 `reasoning:{effort:'medium'}` 在反代侧只被当作真假开关(`models.ts:33-35` 仅判 none/off/0/false/disabled),
@@ -183,7 +183,8 @@
 
 ## P3 —— 测试、CI 与版本文档
 
-- [ ] **P3-1 smoke 覆盖面不够**
+- [x] **P3-1 smoke 覆盖面不够** —— 已扩到 9 段：分片 tool_calls 合成、单块双调用与 id 兜底、abort→ABORTED、401/429/502 码分流与 Retry-After、真实 usage 只发一块、无 usage 时的估算口径、system/developer 透传与未知角色告警、多行描述完整上线、归因头确实带出、错误路径 block 闭合、探活 TTL、diffHealth。
+  仍缺：泄漏闸门行为（等 P1-3 一起做）、`logFile` 轮转（目前只在 live_e2e 真机侧验过）。
   现状:`test/smoke.mjs` 已有 `[5/5]` 两例(泄漏 → `PROTOCOL_LEAK`;正文里出现 parameter 样式文本 → 正常 `stop`)。
   待补:单 chunk 多调用、分片 `tool_calls` 按 index 累积、abort → `ABORTED`、401 不可重试、
   真实 usage 存在时不发估算、messages 含 system 角色、多行 description 完整透传、错误路径仍补 `block-end`。
@@ -196,7 +197,9 @@
 - [ ] **P3-3 插件与后端的版本契约没有锁**
   证据:插件 0.1.0 的正确性依赖反代未发布的那批提交(`25c39de`…`e117a84`:DSML 解析、`DS_TOOLS`、截断重试、推理流式)。
   跑一个旧 `dist` 会**静默退回到最初那个 bug**(协议文本当正文、回合判为 completed)。
-  改法:配合 P1-6 的 `/health.version`,`ensure()` 里校验 `minBackendVersion`,不满足就明确报错并提示 `pnpm build`。
+  现状:P1-6 之后 `/health` 会自述 version 与开关，旧构建(不自述)已被 `diffHealth` 判为 stale 并告警——**能发现，但不会拦**。
+  待做:把"必须满足的能力下界"写成断言(例如要求 `/health` 里出现 `toolCalls` 字段，缺失即拒绝复用而不是只 warn)，
+  或给反代发一个真正的版本号(现在恒为 0.1.0，分辨不出新旧)。
 
 - [ ] **P3-4 `install.ps1` 校验太弱**
   证据:只判断 `dist/index.js` **是否存在**(过期 dist 也算通过),只复制 `lib`/`package.json`/`README.md`,
@@ -211,6 +214,35 @@
   `camofox POST /tabs HTTP 500 (browserType.launch ENOENT)` 与 `HTTP 400 Blocked URL scheme: file:`。
 
 ---
+
+## 附:P1 落地记录(本轮第二批,含真机复验)
+
+1. **P1-1 工具调用按 `index` 累积**:改为 `Map<index,{id,name,args}>` 收分片,流收尾时统一
+   `block-start → tool-call-delta → block-end` 整块下发;缺 id 用 `call_dsh_<ts>_<seq>` 自增兜底。
+   smoke `[8/9]` 两个用例:同 index 分两片合成一个完整 `{"command":"ls"}`;一个 chunk 两个调用各自成块且 id 不撞。
+2. **P1-4 探活缓存 + 空闲超时**:`/health` 结果按 `healthTtlMs`(默认 30s)缓存,`ensure()` 命中缓存不再发请求
+   (smoke `[9/9]` 断言三次 ensure 只打一次 `/health`);读流用 `Promise.race` 包一层 `streamIdleTimeoutMs`
+   (默认 120s),超时抛 `failureCode:'TIMEOUT'` → 归一为可重试的 `TIMEOUT`,不再永久挂着(smoke 实测 300ms 触发)。
+3. **P1-6 后端可辨识**:`/health` 现在回 `version/toolReasoning/toolCalls/authReady/authAgeMs`
+   (反代侧新增 `src/server/health.ts`,每次现读);插件 `diffHealth()` 比对自身配置,
+   旧构建或开关不一致就 `logger.warn`(不阻断,复用可能有意为之)。
+   真机复验:插件自己 spawn 新 dist 后拿到 `{version:"0.1.0",toolReasoning:"clean",toolCalls:"text",authReady:true,authAgeMs:1315711}`,
+   `mismatches=0`;这条恰好把 P1-6 当初的疑点关掉了——现在能证明当时跑的到底是哪套配置。
+4. **P1-7 每轮一行统计**:`logger.debug` 打 `model/ms/ttft/reasonChars/contentChars/toolCalls/usage/conversation/outcome`,
+   失败路径按 warn。真机实测:`ms=4482 ttft=4019ms reasonChars=215 toolCalls=1 usage=0/671 outcome=tool-calls`,
+   其中 `671` 是上游真实累计输出 token(不再是字符估算),`conversation` 可拿去反查网页会话血缘。
+5. **P1-8 日志落盘**:`logFile` 配置后子进程输出按行追加(带 ISO 时间戳),超 2MB 轮转 `.1`;
+   内存环形缓冲从 50 行提到 200 行。真机复验:跑完一轮日志文件 7 行。
+6. **P1-5 补完**:错误/提前 return 路径统一走 `closeOpenBlock()`,smoke 断言 `block-start` 与 `block-end` 数量相等。
+
+**P1 剩下的两条(都需要设计取舍,没动)**:
+- **P1-2 工具回合正文仍全量缓冲**:实测 `write` 那种 38474 字符的大参数回合,界面 75s 只见思考不见正文。
+  反代已有 `ProtocolTextGate` 只扣"可能是标记开头"的尾巴,理论可接上增量下发,但要重新论证
+  "半截协议永不外泄"这条不变量,并补跨 chunk 切断标记的用例——是设计变更,不是补丁。
+- **P1-3 泄漏闸门前移到 text-delta**:现在泄漏仍要在流末尾才发现(先给用户看脏文本,再重试一轮)。
+  另:检测口径目前只硬扫 `｜DSML｜` 与 `tool_call` 两族标记,反代侧新协议形态若再变,这里要同步。
+
+
 
 ## 附:本次真机会话原始数据(便于复查)
 
