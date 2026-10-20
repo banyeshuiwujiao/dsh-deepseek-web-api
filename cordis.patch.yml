@@ -20,3 +20,6 @@
         startTimeoutMs: 60000
         maxContextWindow: 128000
         defaultMaxTokens: 8192
+        # 拉起后端时注入的环境开关；clean 让深度思考实时流式，tools 选择提示词里的工具协议形态。
+        toolReasoning: 'clean'
+        tools: 'text'

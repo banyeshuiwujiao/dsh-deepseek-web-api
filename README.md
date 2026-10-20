@@ -14,10 +14,11 @@
 2. **免手动启停 (autoStart)**：调用时自动检测 `http://127.0.0.1:8787/health`，若未启动则自动拉起 `git-repo\deepseek-web-api` 后端服务，并在插件卸载或客户端退出时安全释放。
 3. **原生凭据解析**：自动寻找 `data/.api-key`、环境变量 `DS_API_KEY` 或 patch 配置中的 `apiKey`。
 4. **原生流式与思考协议**：无缝映射 OpenAI SSE 增量为 DSH 原生 `StreamChunk`：
-   - `reasoning_content` → DSH `reasoning-delta`（原生深度思考折叠气泡渲染）
-   - `content` → DSH `text-delta`
+   - `reasoning_content` → DSH `reasoning-delta`（原生深度思考折叠气泡渲染，边生成边推送）
+   - `content` → DSH `text-delta`（工具回合的正文在反代解析完协议文本后一次性下发，避免半截标记）
    - `tool_calls` → DSH 原生 `tool-call-delta`
-5. **不污染工具列表**：遵循 DSH 设计哲学，不导出任何 Action 工具。
+5. **协议残留兜底**：若反代返回的正文里仍有未解析的工具协议标记（DSML / 文本协议），插件不再把它当普通回答静默结束回合，而是上报可重试错误 `PROTOCOL_LEAK`。
+6. **不污染工具列表**：遵循 DSH 设计哲学，不导出任何 Action 工具。
 
 ---
 
@@ -48,7 +49,11 @@ cd C:\Users\Admin\DeepSeek_Harness\dsh-client-config\plugins\dsh-deepseek-web-ap
         startTimeoutMs: 60000
         maxContextWindow: 128000
         defaultMaxTokens: 8192
+        toolReasoning: 'clean'   # 注入后端 DS_TOOL_REASONING：clean 才能实时流式深度思考
+        tools: 'text'            # 注入后端 DS_TOOLS：text = JSON 协议，native = 网页标记协议
 ```
+
+> `toolReasoning` / `tools` 只在插件**自己拉起**后端进程时生效；如果 8787 已经被别的进程占用，插件会直接复用（复用实例的环境变量由那次启动决定）。
 
 ### 3. 同步运行时配置
 
