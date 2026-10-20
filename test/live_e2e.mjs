@@ -1,6 +1,8 @@
-import { createBackendManager } from "../lib/server.js"
+import { existsSync, readFileSync } from "node:fs"
+import { createBackendManager, diffHealth } from "../lib/server.js"
 import { DeepSeekWebApiAdapter } from "../lib/provider.js"
 
+const logFile = "C:\\Users\\Admin\\.dsh\\logs\\deepseek-web-api.log"
 const opts = {
   baseUrl: "http://127.0.0.1:8787",
   serverDir: "C:\\Users\\Admin\\DeepSeek_Harness\\git-repo\\deepseek-web-api",
@@ -9,18 +11,25 @@ const opts = {
   toolReasoning: "clean",
   tools: "text",
   defaultMaxTokens: 32768,
+  healthTtlMs: 0,
+  logFile,
 }
 
+const warnings = []
 const logger = {
   info: (...a) => console.log("[info]", ...a),
-  warn: (...a) => console.log("[warn]", ...a),
-  debug: () => {},
+  warn: (...a) => { console.log("[warn]", ...a); warnings.push(String(a[0])) },
+  debug: (...a) => console.log("[debug]", ...a),
 }
 
 console.log("== 1) 由插件自己拉起后端（验证 spawnServer + env 注入路径）==")
 const manager = createBackendManager(opts, logger)
-await manager.ensure()
+const health = await manager.ensure()
 console.log("ensure() ok; isRunning(spawned by us) =", manager.isRunning)
+console.log("后端自述:", JSON.stringify(health))
+const diff = diffHealth(health, opts)
+console.log("配置比对:", diff.stale ? "旧构建(stale)" : "可识别构建", "mismatches =", diff.mismatches.length)
+if (diff.mismatches.length > 0) console.log("  ->", diff.mismatches.join(" | "))
 
 const adapter = new DeepSeekWebApiAdapter(opts, manager, logger)
 const resolved = await adapter.resolveModel("deepseek-web-api", "deepseek-web-thinking")
@@ -57,6 +66,10 @@ console.log("  正文:", JSON.stringify(text.slice(0, 200)))
 console.log("  finish:", JSON.stringify(chunks.find((c) => c.type === "finish")?.reason))
 console.log("  总耗时:", Date.now() - t0, "ms")
 
-console.log("\n== 3) 保留后端进程供客户端复用（不调用 dispose）==")
+console.log("\n== 3) 落盘日志与告警 ==")
+console.log("  告警条数:", warnings.length, warnings.length > 0 ? "-> " + warnings.join(" | ") : "(无)")
+console.log("  日志文件:", existsSync(logFile) ? `${readFileSync(logFile, "utf8").split("\n").length} 行` : "不存在")
+
+console.log("\n== 4) 保留后端进程供客户端复用（不调用 dispose）==")
 // 后端子进程的 stdio 管道会挂住事件循环，脚本必须显式退出（后端本身不受影响，继续监听 8787）。
 process.exit(0)

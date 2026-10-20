@@ -26,3 +26,9 @@
         # 拉起后端时注入的环境开关；clean 让深度思考实时流式，tools 选择提示词里的工具协议形态。
         toolReasoning: 'clean'
         tools: 'text'
+        # /health 结果缓存：一次 13 步的会话不必每步都探活一次。0 = 每次都探活。
+        healthTtlMs: 30000
+        # 上游连续无数据的容忍上限，超时按可重试的 TIMEOUT 中止。0 = 不设上限。
+        streamIdleTimeoutMs: 120000
+        # 填路径则把后端子进程输出落盘（超过 2MB 轮转 .1），便于事后取证；留空只留在内存尾部 20 行。
+        logFile: ''

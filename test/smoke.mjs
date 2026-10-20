@@ -17,8 +17,12 @@ import {
   retryAfterMs,
   resolveThinkingEnabled,
 } from '../lib/provider.js'
+import { createBackendManager, diffHealth } from '../lib/server.js'
 
-console.log('=== [1/7] 基础格式化：文本抽取与工具转换 ===')
+const loggerProbe = { info() {}, warn: (m) => probeWarnings.push(m), debug() {} }
+const probeWarnings = []
+
+console.log('=== [1/9] 基础格式化：文本抽取与工具转换 ===')
 assert.equal(textOf('hello'), 'hello')
 assert.equal(textOf([{ type: 'text', text: 'part 1' }, { type: 'text', text: 'part 2' }]), 'part 1\npart 2')
 
@@ -86,7 +90,7 @@ assert.equal(formatOpenAiTools([]), undefined)
 assert.equal(clampDescription(multiLine, 8), '执行 PowerShell'.slice(0, 8) + '…')
 assert.equal(formatOpenAiTools([{ name: 'x', description: multiLine }], 6)[0].function.description, '执行 Pow…')
 
-console.log('=== [2/7] Token 估算与错误码归一 ===')
+console.log('=== [2/9] Token 估算与错误码归一 ===')
 // 中文不再被 /3 低报：CJK 按 1 字符 1 token
 assert.equal(estimateTokens('中文测试'), 4)
 assert.equal(estimateTokens('abcd'), 1)
@@ -114,7 +118,7 @@ assert.equal(resolveThinkingEnabled('deepseek-web-flash'), false)
 assert.equal(resolveThinkingEnabled('deepseek-reasoner'), true)
 assert.equal(resolveThinkingEnabled('my-flash-clone'), false)
 
-console.log('=== [3/7] Provider 契约与 Cordis apply 注册 ===')
+console.log('=== [3/9] Provider 契约与 Cordis apply 注册 ===')
 const fakeCtx = {
   llm: {
     registeredProviders: null,
@@ -163,7 +167,7 @@ for (const code of ['EMPTY_RESPONSE', 'RATE_LIMIT', 'SERVER', 'TIMEOUT', 'TRANSP
 // 内核读的是扁平 backoff 字段，不是嵌套对象
 assert.ok(Number.isFinite(policy.initialDelayMs) && Number.isFinite(policy.maxDelayMs))
 
-console.log('=== [4/7] 模型列表与 resolveModel / prepareCall ===')
+console.log('=== [4/9] 模型列表与 resolveModel / prepareCall ===')
 const models = await adapter.listModels(PROVIDER_ID)
 assert.ok(models.length >= 2, '模型列表数量不足')
 assert.ok(models.some((m) => m.id === 'deepseek-web-flash'))
@@ -183,7 +187,7 @@ assert.equal(typeof prepared.stream, 'function')
 // 已经中止的 signal 不该再发起请求
 await assert.rejects(() => adapter.prepareCall(PROVIDER_ID, 'deepseek-web-flash', { aborted: true }))
 
-console.log('=== [5/7] SSE 增量 → DSH StreamChunk（Mock Server）===')
+console.log('=== [5/9] SSE 增量 → DSH StreamChunk（Mock Server）===')
 
 /** 起一个 mock 反代：记录上线请求，按给定 SSE 行回放。 */
 async function withMockServer(lines, run, options = {}) {
@@ -303,7 +307,7 @@ assert.equal(estimatedUsage[0].usage.outputTokens, estimateTokens('中文回答'
 assert.equal(estimated.chunks.find((c) => c.type === 'finish').reason.kind, 'stop')
 assert.ok(!('max_tokens' in estimated.seen.body), '未指定时不该硬塞 max_tokens')
 
-console.log('=== [6/7] 兜底：协议残留 / 空回合 / 状态码 / 中止 ===')
+console.log('=== [6/9] 兜底：协议残留 / 空回合 / 状态码 / 中止 ===')
 const BAR = String.fromCharCode(0xff5c)
 const LEAK = `${BAR}${BAR}DSML${BAR}${BAR}`
 
@@ -400,7 +404,7 @@ for await (const chunk of preAborted.stream('deepseek-web-flash', { messages: []
 }
 assert.equal(preChunks[0].reason.kind, 'aborted')
 
-console.log('=== [7/7] 后端不可用时的错误口径 ===')
+console.log('=== [7/9] 后端不可用时的错误口径 ===')
 const offline = new DeepSeekWebApiAdapter({ baseUrl: 'http://127.0.0.1:1', autoStart: false })
 const offlineChunks = []
 for await (const chunk of offline.stream('deepseek-web-flash', { messages: [{ role: 'user', content: 'x' }] })) {
@@ -410,6 +414,103 @@ const offlineFinish = offlineChunks.find((c) => c.type === 'finish')
 assert.equal(offlineFinish.reason.kind, 'error')
 assert.ok(['TRANSPORT', 'SERVER'].includes(offlineFinish.reason.failure.code))
 console.log('✅ 后端不可达:', offlineFinish.reason.failure.code)
+
+console.log('=== [8/9] 工具调用按 index 累积 / 流空闲超时 ===')
+
+// 反代今天一个 chunk 给完整数组；若上游改成标准分片（同 index 多次追加），必须合成一个完整调用。
+const fragmented = await withMockServer(
+  [
+    'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_a","function":{"name":"pwsh","arguments":"{\\"com"}}]}}]}\n\n',
+    'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"mand\\":\\"ls\\"}"}}]}}]}\n\n',
+    'data: {"choices":[{"finish_reason":"tool_calls"}]}\n\n',
+    'data: [DONE]\n\n',
+  ],
+  { messages: [{ role: 'user', content: '列目录' }] },
+)
+const fragCalls = fragmented.chunks.filter((c) => c.type === 'tool-call-delta')
+assert.equal(fragCalls.length, 1, `分片没有被合成: ${JSON.stringify(fragCalls.map((c) => c.argumentsDelta))}`)
+assert.equal(fragCalls[0].id, 'call_a')
+assert.equal(fragCalls[0].name, 'pwsh')
+assert.equal(fragCalls[0].argumentsDelta, '{"command":"ls"}')
+assert.equal(fragmented.chunks.find((c) => c.type === 'finish').reason.kind, 'tool-calls')
+
+// 一个 chunk 里两个调用：各自成块，且缺 id 时不许撞号
+const multi = await withMockServer(
+  [
+    'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"name":"read","arguments":"{\\"p\\":1}"}},{"index":1,"function":{"name":"write","arguments":"{\\"p\\":2}"}}]}}]}\n\n',
+    'data: {"choices":[{"finish_reason":"tool_calls"}]}\n\n',
+    'data: [DONE]\n\n',
+  ],
+  { messages: [{ role: 'user', content: 'x' }] },
+)
+const multiCalls = multi.chunks.filter((c) => c.type === 'tool-call-delta')
+assert.deepEqual(multiCalls.map((c) => c.name), ['read', 'write'])
+assert.equal(new Set(multiCalls.map((c) => c.id)).size, 2, '兜底 id 撞号')
+assert.deepEqual(multiCalls.map((c) => c.argumentsDelta), ['{"p":1}', '{"p":2}'])
+
+// 上游卡住不发数据：按空闲超时中止，报可重试的 TIMEOUT，不能永久挂着
+{
+  const srv = createServer((req, res) => {
+    if (req.url === '/health') {
+      res.writeHead(200, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({ ok: true, version: '0.1.0', toolReasoning: 'clean', toolCalls: 'text', authReady: true, authAgeMs: 1 }))
+      return
+    }
+    // 只发一头就不结束，逼出空闲超时路径
+    res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache' })
+    res.write('data: {"choices":[{"delta":{"content":"开头"}}]}\n\n')
+  })
+  await new Promise((resolve) => srv.listen(0, '127.0.0.1', resolve))
+  const client = new DeepSeekWebApiAdapter({
+    baseUrl: `http://127.0.0.1:${srv.address().port}`,
+    autoStart: false,
+    streamIdleTimeoutMs: 300,
+  })
+  const out = []
+  for await (const chunk of client.stream('deepseek-web-thinking', { messages: [{ role: 'user', content: 'x' }] })) out.push(chunk)
+  const finish = out.find((c) => c.type === 'finish')
+  assert.equal(finish.reason.kind, 'error')
+  assert.equal(finish.reason.failure.code, 'TIMEOUT')
+  assert.ok(out.some((c) => c.type === 'block-end'), '超时路径没闭合 block')
+  srv.closeAllConnections?.()
+  await new Promise((resolve) => srv.close(resolve))
+  console.log('✅ 流空闲超时上报 TIMEOUT（可重试）')
+}
+
+console.log('=== [9/9] 探活缓存与复用实例的配置比对 ===')
+// /health 自述信息与插件配置比对：不一致必须报出来，旧构建要判为 stale
+assert.equal(diffHealth(null, { toolReasoning: 'clean' }).stale, true)
+assert.deepEqual(diffHealth({ version: '0.1.0' }, {}).mismatches, [])
+const mismatch = diffHealth(
+  { version: '0.1.0', toolReasoning: 'hidden', toolCalls: 'native', authReady: false },
+  { toolReasoning: 'clean', tools: 'text' },
+)
+assert.ok(mismatch.mismatches.some((m) => m.includes('DS_TOOL_REASONING')))
+assert.ok(mismatch.mismatches.some((m) => m.includes('DS_TOOLS')))
+assert.ok(mismatch.mismatches.some((m) => m.includes('authReady')))
+
+{
+  let healthHits = 0
+  const srv = createServer((req, res) => {
+    if (req.url === '/health') {
+      healthHits++
+      res.writeHead(200, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({ ok: true, version: '0.1.0', toolReasoning: 'clean', toolCalls: 'text', authReady: true, authAgeMs: 1 }))
+      return
+    }
+    res.writeHead(404).end()
+  })
+  await new Promise((resolve) => srv.listen(0, '127.0.0.1', resolve))
+  const manager = createBackendManager({ baseUrl: `http://127.0.0.1:${srv.address().port}`, autoStart: false, healthTtlMs: 60000 }, loggerProbe)
+  const first = await manager.ensure()
+  assert.equal(first.version, '0.1.0')
+  await manager.ensure()
+  await manager.ensure()
+  assert.equal(healthHits, 1, `13 步会话每次都探活的问题没解决：hits=${healthHits}`)
+  manager.dispose()
+  await new Promise((resolve) => srv.close(resolve))
+  console.log('✅ /health 结果按 TTL 复用，探活次数 =', healthHits)
+}
 
 // 触发 dispose
 fakeCtx.events.dispose?.()
