@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { spawn } from 'node:child_process'
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from 'node:fs'
 import { createServer } from 'node:http'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -22,13 +22,13 @@ import {
   retryAfterMs,
   resolveThinkingEnabled,
 } from '../lib/provider.js'
-import { createBackendManager, diffHealth } from '../lib/server.js'
-import { buildSpawnPlan, isAlive, killProcessTree } from '../lib/process.js'
+import { createBackendManager, diffHealth, resolveApiKey, resetApiKeyCache } from '../lib/server.js'
+import { ENV_BASE_ALLOWLIST, buildChildEnv, buildSpawnPlan, isAlive, killProcessTree } from '../lib/process.js'
 
 const loggerProbe = { info() {}, warn: (m) => probeWarnings.push(m), debug() {} }
 const probeWarnings = []
 
-console.log('=== [1/12] 基础格式化：文本抽取与工具转换 ===')
+console.log('=== [1/14] 基础格式化：文本抽取与工具转换 ===')
 assert.equal(textOf('hello'), 'hello')
 assert.equal(textOf([{ type: 'text', text: 'part 1' }, { type: 'text', text: 'part 2' }]), 'part 1\npart 2')
 
@@ -96,7 +96,7 @@ assert.equal(formatOpenAiTools([]), undefined)
 assert.equal(clampDescription(multiLine, 8), '执行 PowerShell'.slice(0, 8) + '…')
 assert.equal(formatOpenAiTools([{ name: 'x', description: multiLine }], 6)[0].function.description, '执行 Pow…')
 
-console.log('=== [2/12] Token 估算与错误码归一 ===')
+console.log('=== [2/14] Token 估算与错误码归一 ===')
 // 中文不再被 /3 低报：CJK 按 1 字符 1 token
 assert.equal(estimateTokens('中文测试'), 4)
 assert.equal(estimateTokens('abcd'), 1)
@@ -124,7 +124,7 @@ assert.equal(resolveThinkingEnabled('deepseek-web-flash'), false)
 assert.equal(resolveThinkingEnabled('deepseek-reasoner'), true)
 assert.equal(resolveThinkingEnabled('my-flash-clone'), false)
 
-console.log('=== [3/12] Provider 契约与 Cordis apply 注册 ===')
+console.log('=== [3/14] Provider 契约与 Cordis apply 注册 ===')
 const fakeCtx = {
   llm: {
     registeredProviders: null,
@@ -173,7 +173,7 @@ for (const code of ['EMPTY_RESPONSE', 'RATE_LIMIT', 'SERVER', 'TIMEOUT', 'TRANSP
 // 内核读的是扁平 backoff 字段，不是嵌套对象
 assert.ok(Number.isFinite(policy.initialDelayMs) && Number.isFinite(policy.maxDelayMs))
 
-console.log('=== [4/12] 模型列表与 resolveModel / prepareCall ===')
+console.log('=== [4/14] 模型列表与 resolveModel / prepareCall ===')
 const models = await adapter.listModels(PROVIDER_ID)
 assert.ok(models.length >= 2, '模型列表数量不足')
 assert.ok(models.some((m) => m.id === 'deepseek-web-flash'))
@@ -193,7 +193,7 @@ assert.equal(typeof prepared.stream, 'function')
 // 已经中止的 signal 不该再发起请求
 await assert.rejects(() => adapter.prepareCall(PROVIDER_ID, 'deepseek-web-flash', { aborted: true }))
 
-console.log('=== [5/12] SSE 增量 → DSH StreamChunk（Mock Server）===')
+console.log('=== [5/14] SSE 增量 → DSH StreamChunk（Mock Server）===')
 
 /** 起一个 mock 反代：记录上线请求，按给定 SSE 行回放。 */
 async function withMockServer(lines, run, options = {}) {
@@ -313,7 +313,7 @@ assert.equal(estimatedUsage[0].usage.outputTokens, estimateTokens('中文回答'
 assert.equal(estimated.chunks.find((c) => c.type === 'finish').reason.kind, 'stop')
 assert.ok(!('max_tokens' in estimated.seen.body), '未指定时不该硬塞 max_tokens')
 
-console.log('=== [6/12] 兜底：协议残留 / 空回合 / 状态码 / 中止 ===')
+console.log('=== [6/14] 兜底：协议残留 / 空回合 / 状态码 / 中止 ===')
 const BAR = String.fromCharCode(0xff5c)
 const LEAK = `${BAR}${BAR}DSML${BAR}${BAR}`
 
@@ -410,7 +410,7 @@ for await (const chunk of preAborted.stream('deepseek-web-flash', { messages: []
 }
 assert.equal(preChunks[0].reason.kind, 'aborted')
 
-console.log('=== [7/12] 后端不可用时的错误口径 ===')
+console.log('=== [7/14] 后端不可用时的错误口径 ===')
 const offline = new DeepSeekWebApiAdapter({ baseUrl: 'http://127.0.0.1:1', autoStart: false })
 const offlineChunks = []
 for await (const chunk of offline.stream('deepseek-web-flash', { messages: [{ role: 'user', content: 'x' }] })) {
@@ -421,7 +421,7 @@ assert.equal(offlineFinish.reason.kind, 'error')
 assert.ok(['TRANSPORT', 'SERVER'].includes(offlineFinish.reason.failure.code))
 console.log('✅ 后端不可达:', offlineFinish.reason.failure.code)
 
-console.log('=== [8/12] 工具调用按 index 累积 / 流空闲超时 ===')
+console.log('=== [8/14] 工具调用按 index 累积 / 流空闲超时 ===')
 
 // 反代今天一个 chunk 给完整数组；若上游改成标准分片（同 index 多次追加），必须合成一个完整调用。
 const fragmented = await withMockServer(
@@ -483,7 +483,7 @@ assert.deepEqual(multiCalls.map((c) => c.argumentsDelta), ['{"p":1}', '{"p":2}']
   console.log('✅ 流空闲超时上报 TIMEOUT（可重试）')
 }
 
-console.log('=== [9/12] 探活缓存与复用实例的配置比对 ===')
+console.log('=== [9/14] 探活缓存与复用实例的配置比对 ===')
 // /health 自述信息与插件配置比对：不一致必须报出来，旧构建要判为 stale
 assert.equal(diffHealth(null, { toolReasoning: 'clean' }).stale, true)
 assert.deepEqual(diffHealth({ version: '0.1.0' }, {}).mismatches, [])
@@ -575,7 +575,7 @@ await new Promise((r) => ghost.once('exit', r))
 const ghostResult = killProcessTree(ghost.pid)
 assert.equal(ghostResult.ok, true, `杀已退出的进程应幂等成功: ${ghostResult.detail}`)
 
-console.log('=== [12/12] detach 才真解耦：托管后端会随拉起它的那个进程退出而被 EPIPE 带走 ===')
+console.log('=== [12/14] detach 才真解耦：托管后端会随拉起它的那个进程退出而被 EPIPE 带走 ===')
 // 用一个会持续写 stdout 的桩"后端"复现真实形状（真后端 = node dist/index.js start + 心跳日志）。
 // 托管模式 stdio 是管道：拉起者一退，管道断裂，桩进程因 EPIPE 自杀；detach 模式必须活下来。
 const stubDir = mkdtempSync(join(tmpdir(), 'dwb-lifecycle-'))
@@ -681,6 +681,107 @@ try {
   } catch {
     // 清不掉只是留下临时目录，不该让测试失败
   }
+}
+
+console.log('=== [13/14] 子进程环境变量白名单 ===')
+const hostEnv = {
+  PATH: 'C:\\Windows\\system32',
+  SYSTEMROOT: 'C:\\Windows',
+  LOCALAPPDATA: 'C:\\Users\\me\\AppData\\Local',
+  USERPROFILE: 'C:\\Users\\me',
+  TMP: 'C:\\Users\\me\\Temp',
+  // 后端自己认的命名空间：必须放行
+  DS_DEBUG: '1',
+  DS_DATA_DIR: 'D:\\ds-data',
+  DS_TOOL_REASONING: 'hidden',
+  // 宿主的杂项：一律不许渗进子进程
+  npm_config_registry: 'https://registry.example',
+  VIRTUAL_ENV: 'E:\\venv',
+  PYTHONPATH: 'E:\\py',
+  CAMOFOX_PORT: '9334',
+  DEEPSEEK_API_KEY: 'sk-should-not-leak',
+  OTHER_DS_LIKE: 'nope',
+  EMPTY: '',
+  PORT: '9999',
+  HOST: '0.0.0.0',
+}
+const built = buildChildEnv(hostEnv, { inject: { PORT: '8787', DS_TOOLS: 'text', DS_TOOL_REASONING: 'clean' } })
+assert.equal(built.env.PATH, hostEnv.PATH)
+assert.equal(built.env.SYSTEMROOT, hostEnv.SYSTEMROOT)
+assert.equal(built.env.DS_DEBUG, '1', 'DS_ 命名空间应当透传')
+assert.equal(built.env.DS_DATA_DIR, 'D:\\ds-data')
+assert.equal(built.env.DS_TOOL_REASONING, 'clean', '插件显式设定必须盖过宿主同名值')
+assert.equal(built.env.PORT, '8787', '宿主的 PORT 会静默改掉后端监听端口，必须被覆盖')
+assert.equal(built.env.DS_TOOLS, 'text')
+for (const leak of ['npm_config_registry', 'VIRTUAL_ENV', 'PYTHONPATH', 'CAMOFOX_PORT', 'DEEPSEEK_API_KEY', 'OTHER_DS_LIKE', 'EMPTY']) {
+  assert.ok(!(leak in built.env), `${leak} 不该进子进程`)
+}
+assert.ok(!built.keys.some((k) => /npm_|PYTHON|VIRTUAL|CAMOFOX|DEEPSEEK/.test(k)), `白名单漏了: ${built.keys.join(',')}`)
+assert.ok(built.keys.every((k) => ENV_BASE_ALLOWLIST.includes(k) || k.startsWith('DS_') || k === 'PORT'), '出现了未登记的放行项')
+// 兜底口子：显式点名才透传
+assert.equal(buildChildEnv({ WEIRD: 'v', OTHER: 'x' }, { extraKeys: ['WEIRD'] }).env.WEIRD, 'v')
+assert.ok(!('OTHER' in buildChildEnv({ WEIRD: 'v', OTHER: 'x' }, { extraKeys: ['WEIRD'] }).env))
+
+console.log('=== [14/14] API Key 解析优先级、mtime 缓存与缺失告警 ===')
+// 让本段与宿主环境无关（DS_API_KEY 会参与优先级）
+const savedDsKey = process.env.DS_API_KEY
+delete process.env.DS_API_KEY
+resetApiKeyCache()
+try {
+  const keyDir = mkdtempSync(join(tmpdir(), 'dwb-key-'))
+  mkdirSync(join(keyDir, 'data'), { recursive: true })
+  const keyFile = join(keyDir, 'data', '.api-key')
+  const warns = []
+  const keyLogger = { warn: (m) => warns.push(m) }
+
+  // 1) 配置里的 apiKey 优先（并且做 trim）
+  assert.equal(resolveApiKey({ apiKey: '  from-config  ' }, keyLogger), 'from-config')
+  assert.equal(warns.length, 0)
+
+  // 2) 环境变量其次
+  process.env.DS_API_KEY = 'sk-from-env'
+  assert.equal(resolveApiKey({ serverDir: keyDir }, keyLogger), 'sk-from-env')
+  delete process.env.DS_API_KEY
+
+  // 3) 文件解析，并按 mtime 缓存：mtime 不变就不重读盘。
+  //    mtime 用 utimesSync 钉到整秒时间戳，避免文件系统亚毫秒精度让"相同 mtime"不可控。
+  const stampA = new Date(Date.UTC(2021, 0, 1, 0, 0, 0))
+  const stampB = new Date(Date.UTC(2021, 0, 1, 0, 1, 0))
+  writeFileSync(keyFile, 'sk-first\n', 'utf8')
+  utimesSync(keyFile, stampA, stampA)
+  assert.equal(resolveApiKey({ serverDir: keyDir }, keyLogger), 'sk-first')
+  writeFileSync(keyFile, 'sk-changed-but-same-mtime', 'utf8')
+  utimesSync(keyFile, stampA, stampA)
+  assert.equal(resolveApiKey({ serverDir: keyDir }, keyLogger), 'sk-first', '缓存没生效：mtime 未变却重读了盘')
+  // mtime 前进一格，就必须看到新值
+  utimesSync(keyFile, stampB, stampB)
+  assert.equal(resolveApiKey({ serverDir: keyDir }, keyLogger), 'sk-changed-but-same-mtime')
+
+  // 4) 文件缺失：给一次可操作告警，说一次就够，且绝不回显密钥
+  resetApiKeyCache()
+  warns.length = 0
+  const emptyDir = mkdtempSync(join(tmpdir(), 'dwb-nokey-'))
+  assert.equal(resolveApiKey({ serverDir: emptyDir }, keyLogger), '')
+  assert.equal(resolveApiKey({ serverDir: emptyDir }, keyLogger), '')
+  assert.equal(warns.length, 1, `缺失告警应当只说一次，实际 ${warns.length} 次`)
+  assert.match(warns[0], /pnpm login/)
+  assert.match(warns[0], /\.api-key/)
+  assert.ok(!warns.some((w) => w.includes('sk-')), '告警里不得出现密钥内容')
+
+  // 5) 空文件也走同一条告警，不静默
+  resetApiKeyCache()
+  warns.length = 0
+  const blankDir = mkdtempSync(join(tmpdir(), 'dwb-blankkey-'))
+  mkdirSync(join(blankDir, 'data'), { recursive: true })
+  writeFileSync(join(blankDir, 'data', '.api-key'), '   ', 'utf8')
+  assert.equal(resolveApiKey({ serverDir: blankDir }, keyLogger), '')
+  assert.equal(warns.length, 1)
+
+  for (const dir of [keyDir, emptyDir, blankDir]) rmSync(dir, { recursive: true, force: true })
+  console.log('✅ 白名单只放行 OS 必需项与 DS_*；密钥按 mtime 缓存、缺失只说一次且不回显')
+} finally {
+  if (savedDsKey !== undefined) process.env.DS_API_KEY = savedDsKey
+  resetApiKeyCache()
 }
 
 // 触发 dispose

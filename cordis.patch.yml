@@ -36,3 +36,5 @@
         # 副作用是拉起者被强杀时后端会因 EPIPE 自行退出。detach: true 则相反——后端独立存活。
         detach: false
         killTreeOnDispose: true
+        # 子进程环境默认白名单（OS 必需项 + DS_*）。确实还要透传别的变量时在这里点名变量名。
+        passEnvKeys: []

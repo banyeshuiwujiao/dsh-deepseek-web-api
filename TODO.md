@@ -149,15 +149,8 @@
   而是因为父进程没了、stdout 管道断裂、写日志时 EPIPE 未捕获而自杀。行为"碰巧对",但既不可控也难诊断,
   一次性脚本会被误伤。
 
-- [ ] **P2-2 spawn 继承整个 `process.env`**
-  证据:`server.js:69` `...process.env`。DSH 进程里任何 `DS_*`/`PORT` 都会渗进后端;
-  目前只因 `opts.env` 最后展开才没被覆盖,插件不认识的变量则完全失控。
-  改法:改成白名单(PATH/HOME/USERPROFILE/APPDATA/TEMP/SYSTEMROOT + 显式 DS_*),其余不传。
-
-- [ ] **P2-3 API Key 每请求同步读盘,缺失时静默**
-  证据:`resolveApiKey`(`server.js:14-31`)每次 `stream()` 都 `readFileSync`;找不到就返回 `''`,
-  请求不带 Authorization → 反代 401 → 按 P0-5 白重试两轮,用户看不到"密钥没配"这个真因。
-  改法:按 mtime 缓存;为空时 `logger.warn` 给出明确指引(`data/.api-key` 路径 + 如何生成);任何日志都不得打印密钥本体。
+- [x] **P2-2 spawn 继承整个 `process.env`** —— 已修(白名单),见「P2 落地记录」第 5 条
+- [x] **P2-3 API Key 每请求同步读盘,缺失时静默** —— 已修(mtime 缓存 + 一次性可操作告警),见「P2 落地记录」第 6 条
 
 - [ ] **P2-4 到处硬编码 `C:\Users\Admin\...`,换机器即废**
   证据:`provider.js:40` DEFAULTS.serverDir、`cordis.patch.yml:18`、`install.ps1` 里的 `$backendDir` 全是绝对路径。
@@ -249,8 +242,22 @@
    - **不杀"不是自己起的" Chrome**。复用已有 Chrome 是后端的既有设计（保住登录态与 CDP 会话），
      插件只负责自己那条进程树。
 
-**P2 剩下的**：P2-2（`spawn` 继承整个 `process.env`，改白名单）、P2-3（API Key 每次同步读盘、缺失静默）、
-P2-4（绝对路径硬编码三处）、P2-6（改配置要重启）。P2-1/P2-8 本批已修，P2-5 属有意设计已关闭。
+5. **环境变量白名单（P2-2）**：新增 `buildChildEnv(source, {inject, extraKeys})`，只放行
+   `ENV_BASE_ALLOWLIST`（PATH/PATHEXT/SYSTEMROOT/WINDIR/COMSPEC/USERPROFILE/APPDATA/LOCALAPPDATA/
+   PROGRAMFILES/TEMP/HOME/TZ/LANG…，跑 Node 与 Chrome 够用，按反代 `src/config/env.ts` 实际读取项核对过）
+   + `DS_` 命名空间（后端自己声明的 `DS_DATA_DIR`/`DS_AUTH_FILE`/`DS_CDP`/`DS_CHROME_PATH`/`DS_DEBUG`/`DS_POW_JS`…）
+   + 插件显式 `inject`（`PORT`/`DS_TOOL_REASONING`/`DS_TOOLS`，优先级最高）+ `opts.env`。
+   其余（`npm_config_*`、`VIRTUAL_ENV`、`PYTHONPATH`、别的插件的 `CAMOFOX_PORT`、`DEEPSEEK_API_KEY`）一律不进子进程。
+   额外收益：宿主的 `HOST=0.0.0.0` 也不再能把反代从"只绑回环"变成监听全网卡——smoke `[13/14]` 专门断言了这一点，
+   并断言白名单里没有未登记项、`passEnvKeys` 点名才放行。逃生口是 `passEnvKeys`（只写变量名）与 `opts.env`。
+   拉起时 `logger.debug` 打印**放行后的变量名清单**（不打印值），渗不透也看得见。
+6. **API Key 解析（P2-3）**：`resolveApiKey(opts, logger)` 保持"配置 → `DS_API_KEY` → `data/.api-key`"优先级，
+   改为**按 mtime 缓存**（一次 13 步会话不再同步读盘 13 次），mtime 前进就重读；
+   文件或内容为空时给**一次性**可操作告警（指出三个来源与 `pnpm login`），任何日志都不回显密钥本体。
+   smoke `[14/14]` 用 `utimesSync` 把 mtime 钉到整秒时间戳，分别证明"mtime 不变不重读""mtime 前进必须见新值"
+   "缺失只 warn 一次""空文件同样告警""告警里不含 sk-"。本段临时摘掉宿主 `DS_API_KEY` 并在 finally 复原，保证与调用环境无关。
+
+**P2 剩下的**：P2-4（绝对路径硬编码三处）、P2-6（改配置要重启）。P2-1/P2-8 本批已修，P2-5 属有意设计已关闭。
 
 
 

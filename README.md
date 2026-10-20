@@ -30,7 +30,9 @@
    - 托管（默认）：后端子进程走 stdio 管道，插件能 `tail` 最近日志、能在 dispose 时用 `taskkill /T` **按进程树回收**（连带后端自己起的 headless Chrome，不再留下占着 CDP 端口的孤儿）。代价是这层耦合是**双向**的：拉起插件的进程一旦被强杀，管道断裂会让后端因 EPIPE 自行退出——对 DSH「宿主退出=服务停」是正确行为。
    - `detach: true`：后端进独立进程组、stdio 落 `logFile` 或忽略，`unref` 后插件退出/卸载都不碰它。适合"起了就一直给客户端复用"，也是 `test/live_e2e.mjs` 用的模式。
    - `killTreeOnDispose: false` 可退回只杀直接子进程的旧行为。
-15. **不污染工具列表**：遵循 DSH 设计哲学，不导出任何 Action 工具。
+15. **子进程环境变量白名单**：拉起后端不再全量继承 `process.env`，只放行「跑起 Node/Chrome 必需的 OS 变量」+ 后端自己声明的 `DS_` 命名空间 + 本插件显式设定。宿主里的 `npm_config_*`、`VIRTUAL_ENV`、`PYTHONPATH`、别的插件的 `CAMOFOX_PORT`、`DEEPSEEK_API_KEY` 都进不去；宿主的 `PORT`/`HOST` 也不会静默改掉后端的监听端口与绑定网卡（要放行用 `passEnvKeys` 点名，或直接写 `env`）。
+16. **API Key 解析可诊断**：优先级为 配置 `apiKey` → 环境变量 `DS_API_KEY` → `<serverDir>/data/.api-key`；文件按 mtime 缓存（不再每步同步读盘），缺失时给一次可操作告警并提示 `pnpm login`，且任何日志都不回显密钥内容。
+17. **不污染工具列表**：遵循 DSH 设计哲学，不导出任何 Action 工具。
 
 ---
 
