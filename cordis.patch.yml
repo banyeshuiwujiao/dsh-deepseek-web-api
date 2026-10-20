@@ -19,7 +19,10 @@
         autoStart: true
         startTimeoutMs: 60000
         maxContextWindow: 128000
-        defaultMaxTokens: 8192
+        # 上游网页端不接受 max_tokens，这个值只是向 DSH 申报单轮输出预留（内核 reservedCompletionTokens）。
+        defaultMaxTokens: 32768
+        # 0 = 不裁剪工具描述；>0 时按字符预算裁剪并加省略号。
+        toolDescriptionMaxChars: 0
         # 拉起后端时注入的环境开关；clean 让深度思考实时流式，tools 选择提示词里的工具协议形态。
         toolReasoning: 'clean'
         tools: 'text'
