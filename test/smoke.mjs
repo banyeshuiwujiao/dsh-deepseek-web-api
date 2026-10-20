@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { spawn } from 'node:child_process'
-import { mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs'
 import { createServer } from 'node:http'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -24,11 +24,12 @@ import {
 } from '../lib/provider.js'
 import { createBackendManager, diffHealth, resolveApiKey, resetApiKeyCache } from '../lib/server.js'
 import { ENV_BASE_ALLOWLIST, buildChildEnv, buildSpawnPlan, isAlive, killProcessTree } from '../lib/process.js'
+import { PROVIDER_ID as CONFIG_PROVIDER_ID, REQUIRED_KEYS, check as checkConfig } from './config_check.mjs'
 
 const loggerProbe = { info() {}, warn: (m) => probeWarnings.push(m), debug() {} }
 const probeWarnings = []
 
-console.log('=== [1/14] 基础格式化：文本抽取与工具转换 ===')
+console.log('=== [1/15] 基础格式化：文本抽取与工具转换 ===')
 assert.equal(textOf('hello'), 'hello')
 assert.equal(textOf([{ type: 'text', text: 'part 1' }, { type: 'text', text: 'part 2' }]), 'part 1\npart 2')
 
@@ -96,7 +97,7 @@ assert.equal(formatOpenAiTools([]), undefined)
 assert.equal(clampDescription(multiLine, 8), '执行 PowerShell'.slice(0, 8) + '…')
 assert.equal(formatOpenAiTools([{ name: 'x', description: multiLine }], 6)[0].function.description, '执行 Pow…')
 
-console.log('=== [2/14] Token 估算与错误码归一 ===')
+console.log('=== [2/15] Token 估算与错误码归一 ===')
 // 中文不再被 /3 低报：CJK 按 1 字符 1 token
 assert.equal(estimateTokens('中文测试'), 4)
 assert.equal(estimateTokens('abcd'), 1)
@@ -124,7 +125,7 @@ assert.equal(resolveThinkingEnabled('deepseek-web-flash'), false)
 assert.equal(resolveThinkingEnabled('deepseek-reasoner'), true)
 assert.equal(resolveThinkingEnabled('my-flash-clone'), false)
 
-console.log('=== [3/14] Provider 契约与 Cordis apply 注册 ===')
+console.log('=== [3/15] Provider 契约与 Cordis apply 注册 ===')
 const fakeCtx = {
   llm: {
     registeredProviders: null,
@@ -173,7 +174,7 @@ for (const code of ['EMPTY_RESPONSE', 'RATE_LIMIT', 'SERVER', 'TIMEOUT', 'TRANSP
 // 内核读的是扁平 backoff 字段，不是嵌套对象
 assert.ok(Number.isFinite(policy.initialDelayMs) && Number.isFinite(policy.maxDelayMs))
 
-console.log('=== [4/14] 模型列表与 resolveModel / prepareCall ===')
+console.log('=== [4/15] 模型列表与 resolveModel / prepareCall ===')
 const models = await adapter.listModels(PROVIDER_ID)
 assert.ok(models.length >= 2, '模型列表数量不足')
 assert.ok(models.some((m) => m.id === 'deepseek-web-flash'))
@@ -193,7 +194,7 @@ assert.equal(typeof prepared.stream, 'function')
 // 已经中止的 signal 不该再发起请求
 await assert.rejects(() => adapter.prepareCall(PROVIDER_ID, 'deepseek-web-flash', { aborted: true }))
 
-console.log('=== [5/14] SSE 增量 → DSH StreamChunk（Mock Server）===')
+console.log('=== [5/15] SSE 增量 → DSH StreamChunk（Mock Server）===')
 
 /** 起一个 mock 反代：记录上线请求，按给定 SSE 行回放。 */
 async function withMockServer(lines, run, options = {}) {
@@ -313,7 +314,7 @@ assert.equal(estimatedUsage[0].usage.outputTokens, estimateTokens('中文回答'
 assert.equal(estimated.chunks.find((c) => c.type === 'finish').reason.kind, 'stop')
 assert.ok(!('max_tokens' in estimated.seen.body), '未指定时不该硬塞 max_tokens')
 
-console.log('=== [6/14] 兜底：协议残留 / 空回合 / 状态码 / 中止 ===')
+console.log('=== [6/15] 兜底：协议残留 / 空回合 / 状态码 / 中止 ===')
 const BAR = String.fromCharCode(0xff5c)
 const LEAK = `${BAR}${BAR}DSML${BAR}${BAR}`
 
@@ -410,7 +411,7 @@ for await (const chunk of preAborted.stream('deepseek-web-flash', { messages: []
 }
 assert.equal(preChunks[0].reason.kind, 'aborted')
 
-console.log('=== [7/14] 后端不可用时的错误口径 ===')
+console.log('=== [7/15] 后端不可用时的错误口径 ===')
 const offline = new DeepSeekWebApiAdapter({ baseUrl: 'http://127.0.0.1:1', autoStart: false })
 const offlineChunks = []
 for await (const chunk of offline.stream('deepseek-web-flash', { messages: [{ role: 'user', content: 'x' }] })) {
@@ -421,7 +422,7 @@ assert.equal(offlineFinish.reason.kind, 'error')
 assert.ok(['TRANSPORT', 'SERVER'].includes(offlineFinish.reason.failure.code))
 console.log('✅ 后端不可达:', offlineFinish.reason.failure.code)
 
-console.log('=== [8/14] 工具调用按 index 累积 / 流空闲超时 ===')
+console.log('=== [8/15] 工具调用按 index 累积 / 流空闲超时 ===')
 
 // 反代今天一个 chunk 给完整数组；若上游改成标准分片（同 index 多次追加），必须合成一个完整调用。
 const fragmented = await withMockServer(
@@ -483,7 +484,7 @@ assert.deepEqual(multiCalls.map((c) => c.argumentsDelta), ['{"p":1}', '{"p":2}']
   console.log('✅ 流空闲超时上报 TIMEOUT（可重试）')
 }
 
-console.log('=== [9/14] 探活缓存与复用实例的配置比对 ===')
+console.log('=== [9/15] 探活缓存与复用实例的配置比对 ===')
 // /health 自述信息与插件配置比对：不一致必须报出来，旧构建要判为 stale
 assert.equal(diffHealth(null, { toolReasoning: 'clean' }).stale, true)
 assert.deepEqual(diffHealth({ version: '0.1.0' }, {}).mismatches, [])
@@ -518,7 +519,7 @@ assert.ok(mismatch.mismatches.some((m) => m.includes('authReady')))
   console.log('✅ /health 结果按 TTL 复用，探活次数 =', healthHits)
 }
 
-console.log('=== [10/12] 拉起策略：托管 pipes vs detach 解耦 ===')
+console.log('=== [10/15] 拉起策略：托管 pipes vs detach 解耦 ===')
 assert.equal(isAlive(process.pid), true)
 assert.equal(isAlive(0), false)
 assert.equal(isAlive(-1), false)
@@ -539,7 +540,7 @@ assert.equal(detachedQuiet.detached, true)
 const detachedLogged = buildSpawnPlan({ serverDir: 'X:/srv', detach: true, logFile: 'X:/log.txt' }, { stdout: 7, stderr: 8 })
 assert.deepEqual(detachedLogged.stdio, ['ignore', 7, 8])
 
-console.log('=== [11/12] 进程树回收：孙进程必须一起带走 ===')
+console.log('=== [11/15] 进程树回收：孙进程必须一起带走 ===')
 // 复现真机泄漏的形态：父进程再起一个孙进程（后端 -> headless Chrome 就是这个形状）。
 // 旧的 child.kill() 只杀父，孙进程变孤儿继续占 CDP 端口。
 const grandScript = 'const{spawn}=require("child_process");'
@@ -575,7 +576,7 @@ await new Promise((r) => ghost.once('exit', r))
 const ghostResult = killProcessTree(ghost.pid)
 assert.equal(ghostResult.ok, true, `杀已退出的进程应幂等成功: ${ghostResult.detail}`)
 
-console.log('=== [12/14] detach 才真解耦：托管后端会随拉起它的那个进程退出而被 EPIPE 带走 ===')
+console.log('=== [12/15] detach 才真解耦：托管后端会随拉起它的那个进程退出而被 EPIPE 带走 ===')
 // 用一个会持续写 stdout 的桩"后端"复现真实形状（真后端 = node dist/index.js start + 心跳日志）。
 // 托管模式 stdio 是管道：拉起者一退，管道断裂，桩进程因 EPIPE 自杀；detach 模式必须活下来。
 const stubDir = mkdtempSync(join(tmpdir(), 'dwb-lifecycle-'))
@@ -683,7 +684,7 @@ try {
   }
 }
 
-console.log('=== [13/14] 子进程环境变量白名单 ===')
+console.log('=== [13/15] 子进程环境变量白名单 ===')
 const hostEnv = {
   PATH: 'C:\\Windows\\system32',
   SYSTEMROOT: 'C:\\Windows',
@@ -722,7 +723,7 @@ assert.ok(built.keys.every((k) => ENV_BASE_ALLOWLIST.includes(k) || k.startsWith
 assert.equal(buildChildEnv({ WEIRD: 'v', OTHER: 'x' }, { extraKeys: ['WEIRD'] }).env.WEIRD, 'v')
 assert.ok(!('OTHER' in buildChildEnv({ WEIRD: 'v', OTHER: 'x' }, { extraKeys: ['WEIRD'] }).env))
 
-console.log('=== [14/14] API Key 解析优先级、mtime 缓存与缺失告警 ===')
+console.log('=== [14/15] API Key 解析优先级、mtime 缓存与缺失告警 ===')
 // 让本段与宿主环境无关（DS_API_KEY 会参与优先级）
 const savedDsKey = process.env.DS_API_KEY
 delete process.env.DS_API_KEY
@@ -783,6 +784,37 @@ try {
   if (savedDsKey !== undefined) process.env.DS_API_KEY = savedDsKey
   resetApiKeyCache()
 }
+
+console.log('=== [15/15] 配置样板自检（守门员也要有人守）===')
+// 正例：仓库里的样板必须无问题，且必需键齐全
+const sampleText = readFileSync(fileURLToPath(new URL('../cordis.patch.yml', import.meta.url)), 'utf8')
+const sampleCheck = checkConfig(sampleText)
+assert.deepEqual(sampleCheck.problems, [], `cordis.patch.yml 有问题:\n${sampleCheck.problems.join('\n')}`)
+assert.equal(sampleCheck.keys.length, REQUIRED_KEYS.length)
+for (const key of REQUIRED_KEYS) assert.ok(sampleCheck.keys.includes(key), `样板缺键 ${key}`)
+
+// 反例：每一类错误都必须被抓住，否则这个守卫等于没有
+const brokenTab = checkConfig('- insert:\n    - id: x\n\t  name: y\n')
+assert.ok(brokenTab.problems.some((p) => p.includes('Tab')), 'Tab 缩进没被抓住')
+
+const missingKeyText = sampleText.replace(/^\s*passEnvKeys:.*$/m, '')
+assert.ok(
+  checkConfig(missingKeyText).problems.some((p) => p.includes('passEnvKeys')),
+  '缺键没被抓住（这正是一次整文件提交容易丢的东西）',
+)
+
+const noInsert = checkConfig('# 什么都没有\n')
+assert.ok(noInsert.problems.some((p) => p.includes('insert')), '缺少 insert 入口没被抓住')
+assert.ok(noInsert.problems.some((p) => p.includes(CONFIG_PROVIDER_ID)), '缺少 provider id 没被抓住')
+
+// baseUrl 绑到非回环 = 把带登录态的反代暴露出去，必须红
+const publicBind = checkConfig(sampleText.replace("'http://127.0.0.1:8787'", "'http://0.0.0.0:8787'"))
+assert.ok(publicBind.problems.some((p) => p.includes('回环')), 'baseUrl 绑到 0.0.0.0 没被抓住')
+
+// 开关取值非法会让反代启动即失败
+const badEnum = checkConfig(sampleText.replace("toolReasoning: 'clean'", "toolReasoning: 'loud'"))
+assert.ok(badEnum.problems.some((p) => p.includes('toolReasoning')), '非法 toolReasoning 没被抓住')
+console.log('✅ 配置自检：正例通过，Tab / 缺键 / 缺入口 / 公网绑定 / 非法枚举 全部被抓住')
 
 // 触发 dispose
 fakeCtx.events.dispose?.()

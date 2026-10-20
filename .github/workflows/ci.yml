@@ -1,0 +1,70 @@
+name: CI
+
+# 说明为什么两个 job 的 runner 不同：
+# - smoke 里的进程树回收（[11/15]）与"托管 stdio 被 EPIPE 牵连 / detach 独立存活"（[12/15]）
+#   是平台语义测试：Windows 走 taskkill /T，POSIX 的退路只能杀单进程。
+#   在 Linux 上把这两段跑"过"是没有意义的绿，所以 smoke 钉死 windows-latest。
+# - 配置结构自检与语法检查与平台无关，用 ubuntu 便宜快。
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  structure:
+    name: 语法检查与配置结构自检
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node-version: ['20', '22']
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 设置 Node ${{ matrix.node-version }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+
+      # 本插件零依赖，CI 不装包；有依赖就说明有人改了 package.json 却没同步这份 workflow。
+      - name: 确认零依赖
+        run: node -e "const p=require('./package.json'); const n=Object.keys(p.dependencies||{}).length+Object.keys(p.devDependencies||{}).length; if(n>0){console.error('插件出现依赖('+n+' 个)，CI 需要显式安装并复核离线装配'); process.exit(1)}"
+
+      - name: 语法检查
+        run: |
+          for f in lib/*.js test/*.mjs; do node --check "$f"; done
+
+      - name: cordis.patch.yml 结构自检
+        run: node test/config_check.mjs
+
+  smoke:
+    name: smoke（Windows，含真实子进程拉起与进程树回收）
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node-version: ['20', '22']
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 设置 Node ${{ matrix.node-version }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+
+      # 15 段：格式化/错误码/usage 口径/中止语义/分片累积/探活 TTL/
+      # 环境白名单/密钥缓存/配置自检，以及用真进程验证的 detach 与树回收。
+      - name: 运行 smoke
+        shell: bash
+        run: node test/smoke.mjs
+
+      - name: 本地专用测试的存在性检查（不在 CI 跑，只确认没被误删）
+        shell: bash
+        run: |
+          test -f test/preparecall_regression.mjs   # 需要真实 DSH LlmRuntime
+          test -f test/live_e2e.mjs                 # 需要已登录的反代与一次真实网页调用
+          echo "preparecall_regression / live_e2e 依赖本机运行时与登录态，只在本地跑（README「验证与测试」）"
