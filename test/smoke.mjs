@@ -170,4 +170,52 @@ try {
 
 // 触发 dispose
 fakeCtx.events.dispose?.()
+
+console.log('=== [5/5] 验证残留协议文本兜底（不再静默结束回合）===')
+const BAR = String.fromCharCode(0xff5c)
+const LEAK = `${BAR}${BAR}DSML${BAR}${BAR}`
+const leakLines = [
+  'data: {"choices":[{"delta":{"content":"我先建目录。\\n<' + LEAK + ' invoke name=\\"pwsh\\">"}}]}\n\n',
+  'data: {"choices":[{"finish_reason":"stop"}]}\n\n',
+  'data: [DONE]\n\n',
+]
+const proseLines = [
+  'data: {"choices":[{"delta":{"content":"示例代码里写成 <parameter value=1> 或 calls 数组都算正常正文。"}}]}\n\n',
+  'data: {"choices":[{"finish_reason":"stop"}]}\n\n',
+  'data: [DONE]\n\n',
+]
+
+async function collect(lines) {
+  const srv = createServer((req, res) => {
+    if (req.url === '/health') {
+      res.writeHead(200, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({ ok: true }))
+      return
+    }
+    res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache' })
+    for (const line of lines) res.write(line)
+    res.end()
+  })
+  await new Promise((resolve) => srv.listen(0, '127.0.0.1', resolve))
+  const base = `http://127.0.0.1:${srv.address().port}`
+  const client = new DeepSeekWebApiAdapter({ baseUrl: base, autoStart: false })
+  const out = []
+  for await (const chunk of client.stream('deepseek-web-thinking', { messages: [{ role: 'user', content: '测试' }] })) {
+    out.push(chunk)
+  }
+  await new Promise((resolve) => srv.close(resolve))
+  return out
+}
+
+const leaked = await collect(leakLines)
+const leakFinish = leaked.find((c) => c.type === 'finish')
+assert.equal(leakFinish.reason.kind, 'error')
+assert.equal(leakFinish.reason.failure.code, 'PROTOCOL_LEAK')
+console.log('✅ 残留协议文本被识别为可重试错误:', leakFinish.reason.failure.code)
+
+const clean = await collect(proseLines)
+assert.equal(clean.find((c) => c.type === 'finish').reason.kind, 'stop')
+assert.ok(clean.some((c) => c.type === 'text-delta'))
+console.log('✅ 正常正文仍按 stop 结束')
+
 console.log('✅ 全部 Smoke 单元测试通过！')
