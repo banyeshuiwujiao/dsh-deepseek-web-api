@@ -184,27 +184,32 @@
 
 - [x] **P3-1 smoke 覆盖面不够** —— 已扩到 9 段：分片 tool_calls 合成、单块双调用与 id 兜底、abort→ABORTED、401/429/502 码分流与 Retry-After、真实 usage 只发一块、无 usage 时的估算口径、system/developer 透传与未知角色告警、多行描述完整上线、归因头确实带出、错误路径 block 闭合、探活 TTL、diffHealth。
   仍缺：泄漏闸门行为（等 P1-3 一起做）、`logFile` 轮转（目前只在 live_e2e 真机侧验过）。
-  现状:`test/smoke.mjs` 已有 `[5/5]` 两例(泄漏 → `PROTOCOL_LEAK`;正文里出现 parameter 样式文本 → 正常 `stop`)。
-  待补:单 chunk 多调用、分片 `tool_calls` 按 index 累积、abort → `ABORTED`、401 不可重试、
-  真实 usage 存在时不发估算、messages 含 system 角色、多行 description 完整透传、错误路径仍补 `block-end`。
+  现状:`test/smoke.mjs` 已扩到 15 段，上面列的"待补"全部有断言（分片累积 `[8/15]`、abort `[6/15]`、
+  401/429/502 与 Retry-After `[6/15]`、usage 单块与估算口径 `[5/15]`、system/developer 透传 `[1/15]`、
+  多行描述完整上线 `[1/15]`+`[5/15]`、错误路径补 `block-end` `[6/15]`、探活 TTL `[9/15]`、
+  进程树与 detach `[11/15]``[12/15]`、环境白名单 `[13/15]`、密钥缓存 `[14/15]`、配置守卫 `[15/15]`）。
 
-- [ ] **P3-2 没有 CI**
+- [x] **P3-2 没有 CI** —— 已加 `.github/workflows/ci.yml`（见「P3 落地记录」）
   证据:仓库无 `.github/`;`package.json` 的 `test` 只跑 smoke,`preparecall_regression.mjs` 需要真实 DSH 运行时(CI 跑不了)。
-  改法:加 workflow 跑 `node --check lib/*.js` + `node test/smoke.mjs`;把 prepareCall 回归标为"仅本地",
-  并在 README 写清两者的分工。
+  实际做法:`structure`(ubuntu,Node 20/22) 跑语法检查 + 零依赖断言 + `config_check`;
+  `smoke`(**windows-latest**,Node 20/22) 跑完整 15 段。smoke 钉在 Windows 是刻意的——
+  `[11/15]` 依赖 `taskkill /T`、`[12/15]` 验证托管/detach 的父子进程语义，Linux 上跑"绿"是自欺。
+  `preparecall_regression` / `live_e2e` 保留本地，CI 只检查这两个文件没被误删，并在 README 写明分工。
 
 - [ ] **P3-3 插件与后端的版本契约没有锁**
   证据:插件 0.1.0 的正确性依赖反代未发布的那批提交(`25c39de`…`e117a84`:DSML 解析、`DS_TOOLS`、截断重试、推理流式)。
   跑一个旧 `dist` 会**静默退回到最初那个 bug**(协议文本当正文、回合判为 completed)。
-  现状:P1-6 之后 `/health` 会自述 version 与开关，旧构建(不自述)已被 `diffHealth` 判为 stale 并告警——**能发现，但不会拦**。
-  待做:把"必须满足的能力下界"写成断言(例如要求 `/health` 里出现 `toolCalls` 字段，缺失即拒绝复用而不是只 warn)，
+  现状:P1-6 之后 `/health` 会自述 version 与开关，旧构建(不自述)已被 `diffHealth` 判为 stale 并告警——**能发现，但不会拦**;
+  P3-4 之后 `install.ps1` 会打印后端 git 版本并检查 dist 是否落后于 src——**手工可查，机器不拦**。
+  待做:把"必须满足的能力下界"写成断言(例如 `/health` 缺 `toolCalls` 字段即拒绝复用而不是只 warn)，
   或给反代发一个真正的版本号(现在恒为 0.1.0，分辨不出新旧)。
 
-- [ ] **P3-4 `install.ps1` 校验太弱**
-  证据:只判断 `dist/index.js` **是否存在**(过期 dist 也算通过),只复制 `lib`/`package.json`/`README.md`,
-  不比对版本、不提示后端 git 版本、不重启客户端。
-  改法:比对源与运行时镜像的 `version`;`dist` 的 mtime 早于 `src` 最新文件时强制重建;
-  结束时打印后端 `git rev-parse --short HEAD` 与 `/health` 的 version,便于事后追责。
+- [x] **P3-4 `install.ps1` 校验太弱** —— 已加固（见「P3 落地记录」）
+  原证据:只判断 `dist/index.js` **是否存在**(过期 dist 也算通过),只复制文件,不比对内容、不提示后端 git 版本。
+  已做:①第一步先跑 `config_check`；②dist 与 `src/**/*.ts` 最新 mtime 比对，落后就明确警告"旧 dist 会让新协议能力静默失效";
+  ③打印后端 `git rev-parse --short HEAD`;④同步后**逐文件 SHA256 校验**源与运行时镜像，
+  漏复制/半复制（例如新加 `lib/process.js` 没同步）当场 throw。
+  实测输出:`构建就绪且不落后于源码` + `后端 git 版本: 696f361` + `已同步并校验一致`。
 
 - [ ] **P3-5 文档要补的三件事**
   ① 双协议设计(反代文档化文本协议 vs 网页原生 DSML)与"为什么正文在工具回合要缓冲";
@@ -213,6 +218,36 @@
   `camofox POST /tabs HTTP 500 (browserType.launch ENOENT)` 与 `HTTP 400 Blocked URL scheme: file:`。
 
 ---
+
+## 附:P3 落地记录(CI 与安装校验批次)
+
+1. **CI（P3-2）**：`.github/workflows/ci.yml`，push/PR/手动三种触发，`permissions: contents: read`（最小权限）。
+   - `structure`（ubuntu × Node 20/22）：逐个 `node --check`、**零依赖断言**（插件一旦被人加上依赖，
+     这条会红并提醒复核离线装配——运行时镜像是从 `~/.dsh/profiles/desktop/node_modules` 解析的）、`config_check`。
+   - `smoke`（windows-latest × Node 20/22）：完整 15 段。
+   - 两个本地专用测试**故意不进 CI**（要真实 DSH 运行时 / 要已登录的网页会话并真实调用上游），
+     CI 只 `test -f` 确认没被误删，并在 README 写清分工。
+   - 为什么 smoke 不跑 Linux：`[11/15]` 依赖 `taskkill /T`；`[12/15]` 验的是"托管 stdio 管道断裂会把子进程
+     EPIPE 带走 / detach 独立存活"。POSIX 分支的退路只杀单进程，孙进程会活下来——在 Linux 上跑绿是假信号。
+2. **配置守卫（新增，由本轮事故倒逼出来的）**：`test/config_check.mjs` 不依赖任何 YAML 库，检查
+   缩进（禁 Tab、必须偶数宽）、`- insert:` 入口、provider id 与模块名、15 个必需键、
+   `toolReasoning`/`tools` 枚举取值、以及 **baseUrl 必须只绑回环**（反代携带网页登录态，绑到 `0.0.0.0`
+   等于把账号交出去）。键的定位按 `config:` 自身缩进推下一级，不写死空格数——第一版就是写死 6 空格，
+   而样板实际 8 空格，把真文件判成"缺 15 个键"。
+   守门员自己也有人守：`smoke [15/15]` 用正例 + 五类反例（Tab、缺键、缺入口、公网绑定、非法枚举）钉住它。
+   附带一个真 bug：入口判定原本手拼 `file://` 比较，Windows 盘符路径比不上 → `main()` 静默不执行，
+   脚本"退出码 0 但什么都没测"。现在走 `pathToFileURL`，并被 smoke 间接覆盖。
+3. **install.ps1（P3-4）**：从 4 步变 5 步——先 `config_check`；dist 与 `src/**/*.ts` 最新 mtime 比对，
+   落后就警告（过期 dist 会让 DSML 解析/include_usage 这些能力静默失效，真机上吃过）；打印后端
+   `git rev-parse --short HEAD`；同步后**逐文件 SHA256 校验**源与运行时镜像，漏复制当场 throw。
+   实测：`构建就绪且不落后于源码` / `后端 git 版本: 696f361` / `已同步并校验一致`。
+4. **package.json**：`npm test` = 配置自检 + smoke（与 CI 完全同一套）；另拆出 `test:config` /
+   `test:smoke` / `test:runtime` / `test:live`，本地专用那两个名字里就写着要什么前提。
+
+**P3 剩下的**：P3-3（契约"能发现但不拦"，需要一个真版本号或 `/health` 字段缺失即拒绝复用）、
+P3-5（文档三件事）。
+
+
 
 ## 附:P2 落地记录(进程生命周期批次)
 

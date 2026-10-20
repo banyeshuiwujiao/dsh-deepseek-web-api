@@ -1,5 +1,7 @@
 # dsh-deepseek-web-api (DeepSeek 网页私有 API 反代 Provider 插件)
 
+[![CI](https://github.com/banyeshuiwujiao/dsh-deepseek-web-api/actions/workflows/ci.yml/badge.svg)](https://github.com/banyeshuiwujiao/dsh-deepseek-web-api/actions/workflows/ci.yml)
+
 将 `C:\Users\Admin\DeepSeek_Harness\git-repo\deepseek-web-api` 作为本地反代后端，直接接入 DeepSeek Harness 桌面客户端的**模型选择器**。
 
 > **注意：** 本插件**仅注册 Provider（作为模型大语言模型路由）**，**不向全局工具列表中注册任何工具**。DSH 自带的工具能力（如 PowerShell、文件操作、审批流等）完全由 DSH 原生机制接管调度。
@@ -105,9 +107,21 @@ pnpm login
 ## 验证与测试
 
 ```powershell
-node test/smoke.mjs                    # 契约、纯函数与 SSE 增量模拟（含错误码/中止/usage/归因头）
-node test/preparecall_regression.mjs   # 真实 DSH LlmRuntime 回归
-node test/live_e2e.mjs                 # 真机：由插件自己拉起后端并跑一次真实工具回合（需已登录）
+npm test                     # 配置结构自检 + smoke（CI 跑的就是这两样）
+node test/config_check.mjs   # cordis.patch.yml 结构守卫（缩进/必需键/回环/枚举）
+node test/smoke.mjs          # 契约、纯函数与 SSE 增量模拟（15 段）
+node test/preparecall_regression.mjs   # 真实 DSH LlmRuntime 回归（需本机 DSH 运行时）
+node test/live_e2e.mjs       # 真机：由插件自己拉起后端并跑一次真实工具回合（需已登录）
 ```
 
-`live_e2e.mjs` 会占用 8787 并真实调用一次网页端，跑完**不会**回收后端进程（留给客户端复用）。
+后两个**故意不进 CI**：`preparecall_regression` 要真实的 `@deepseek-ai/dsh-llm` 运行时，
+`live_e2e` 要已登录的网页会话并会真实调用一次上游。CI 只跑与本机状态无关的部分。
+
+CI（`.github/workflows/ci.yml`）分两个 job：
+
+- `structure`（ubuntu，Node 20/22）：语法检查、零依赖断言、`config_check`。
+- `smoke`（**windows-latest**，Node 20/22）：完整 15 段。smoke 钉在 Windows 不是偷懒——
+  `[11/15]` 进程树回收靠 `taskkill /T`，`[12/15]` 验证"托管 stdio 被父进程退出牵连 / detach 独立存活"，
+  都是平台语义；在 Linux 上把它们跑"绿"没有意义（POSIX 退路只能杀单进程）。
+
+`live_e2e.mjs` 会占用 8787 并真实调用一次网页端，跑完**不会**回收后端进程（`detach: true`，留给客户端复用）。
