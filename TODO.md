@@ -164,10 +164,13 @@
   改法:支持环境变量(如 `DSH_DEEPSEEK_WEB_API_DIR`)/相对仓库根解析 + 常见位置探测,失败时给可操作报错;
   文档里把"必须改这三处"写清楚。
 
-- [ ] **P2-5 插件目录自带嵌套 `.git`,外层 `dsh-client-config` 无法追踪其文件**
-  证据:`plugins/dsh-deepseek-web-api/.git` 存在,remote 为 `git@github.com:banyeshuiwujiao/dsh-deepseek-web-api.git`;
-  同级 `dsh-eagent` 等插件都是外层仓库的普通文件。
-  改法:**需要用户决策** —— 保留为独立仓/子模块,或删掉嵌套 `.git` 折进外层仓(删除属破坏性操作,不擅自做)。
+- [x] **P2-5 插件目录自带嵌套 `.git`,外层 `dsh-client-config` 无法追踪其文件** —— **这是有意设计，不要"修"**
+  用户 2026-10-20 明确：本插件故意做成独立仓（`banyeshuiwujiao/dsh-deepseek-web-api`），与配置仓分开提交，
+  避免被 `git add -A` 一并卷进 `dsh-client-config` 的提交。所以：**不删嵌套 `.git`，不折进外层仓，不做 submodule。**
+  配套已落定（外层提交 `0fd2771`）：`.gitignore` 的「嵌套的独立 git 仓库」段补上 `plugins/dsh-deepseek-web-api/`，
+  并 `git rm --cached` 掉 4f22dad 时代误跟踪的 `package.json`（文件留在磁盘，本仓从 `fdba50d` 起一直跟踪它）。
+  留下的规矩：以后本插件目录整体只在本仓提交；外层仓只提交 `profiles/**`；新独立的插件仓都要在同一段 .gitignore 里登记，
+  别再出现"半跟踪"状态。任何后续 agent 看到外层 `?? plugins/dsh-deepseek-web-api/...` 属正常，不是待办。
 
 - [ ] **P2-6 配置快照一次性,改了要重启客户端**
   证据:`apply(ctx, config)`(`provider.js:445-450`)在加载时合并一次 config;
