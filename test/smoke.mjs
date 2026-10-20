@@ -323,18 +323,65 @@ console.log('=== [6/18] 兜底：协议残留 / 空回合 / 状态码 / 中止 =
 const BAR = String.fromCharCode(0xff5c)
 const LEAK = `${BAR}${BAR}DSML${BAR}${BAR}`
 
+const oneTool = [{ name: 'pwsh', description: '执行命令', parameters: { type: 'object' } }]
+
 const leaked = await withMockServer(
   [
     'data: {"choices":[{"delta":{"content":"我先建目录。\\n<' + LEAK + ' invoke name=\\"pwsh\\">"}}]}\n\n',
-    'data: {"choices":[{"finish_reason":"stop"}]}\n\n',
+    'data: {"choices":[{"finish_reason":"stop"}],"diagnostics":{"protocolShape":"dsml","protocolTruncated":false,"toolCallCount":0}}\n\n',
     'data: [DONE]\n\n',
   ],
-  { messages: [{ role: 'user', content: '测试' }] },
+  { messages: [{ role: 'user', content: '测试' }], tools: oneTool },
 )
 const leakFinish = leaked.chunks.find((c) => c.type === 'finish')
 assert.equal(leakFinish.reason.kind, 'error')
 assert.equal(leakFinish.reason.failure.code, 'PROTOCOL_LEAK')
-console.log('✅ 残留协议文本被识别为可重试错误:', leakFinish.reason.failure.code)
+// 报错必须自带定位线索：哪个通道漏的、后端把这一轮判成了什么
+assert.match(leakFinish.reason.failure.message, /通道=content/)
+assert.match(leakFinish.reason.failure.message, /后端判定=dsml/)
+console.log('✅ 带工具时残留协议文本被识别为可重试错误:', leakFinish.reason.failure.code)
+
+// 收窄：本轮没带工具（如会话标题请求）时，协议样式文本是合法正文，不许当错误白烧重试
+const leakedWithoutTools = await withMockServer(
+  [
+    'data: {"choices":[{"delta":{"content":"协议长这样：<' + LEAK + ' invoke name=\\"pwsh\\">，把它拆开看。"}}]}\n\n',
+    'data: {"choices":[{"finish_reason":"stop"}]}\n\n',
+    'data: [DONE]\n\n',
+  ],
+  { messages: [{ role: 'user', content: '解释一下标记协议' }] },
+)
+assert.equal(leakedWithoutTools.chunks.find((c) => c.type === 'finish').reason.kind, 'stop')
+assert.ok(leakedWithoutTools.chunks.some((c) => c.type === 'text-delta'), '无工具时正文被错误吞掉了')
+console.log('✅ 无工具的回合里协议样式文本按正常正文放行')
+
+// 反代的解析结论要进每轮日志（旧后端没这个字段时写 unknown，不能留空）
+{
+  const lines = []
+  const debugLogger = { debug: (m) => lines.push(String(m)), info: () => {}, warn: () => {} }
+  const withDiag = await withMockServer(
+    [
+      'data: {"choices":[{"delta":{"content":"好的，先读文件。"}}]}\n\n',
+      'data: {"choices":[{"finish_reason":"stop"}],"diagnostics":{"protocolShape":"json","protocolTruncated":true,"toolCallCount":0}}\n\n',
+      'data: [DONE]\n\n',
+    ],
+    { messages: [{ role: 'user', content: 'x' }], tools: oneTool },
+    { opts: { logger: debugLogger } },
+  )
+  assert.equal(withDiag.chunks.find((c) => c.type === 'finish').reason.kind, 'stop')
+  const line = lines.find((l) => l.includes('outcome=stop'))
+  assert.ok(line, '没有打出每轮统计行')
+  assert.match(line, /protocolShape=json/)
+  assert.match(line, /protocolTruncated=true/)
+
+  const withoutDiag = await withMockServer(
+    ['data: {"choices":[{"delta":{"content":"旧后端"}}]}\n\n', 'data: {"choices":[{"finish_reason":"stop"}]}\n\n', 'data: [DONE]\n\n'],
+    { messages: [{ role: 'user', content: 'x' }] },
+    { opts: { logger: debugLogger } },
+  )
+  assert.equal(withoutDiag.chunks.find((c) => c.type === 'finish').reason.kind, 'stop')
+  assert.match(lines[lines.length - 1], /protocolShape=unknown/, '旧后端没带诊断时应显式写 unknown')
+  console.log('✅ 后端解析结论进入每轮日志，缺失时显式 unknown')
+}
 
 const clean = await withMockServer(
   [
@@ -342,11 +389,12 @@ const clean = await withMockServer(
     'data: {"choices":[{"finish_reason":"stop"}]}\n\n',
     'data: [DONE]\n\n',
   ],
-  { messages: [{ role: 'user', content: '测试' }] },
+  // 带工具：证明"合法正文里带尖括号字样"不会被误判成泄漏
+  { messages: [{ role: 'user', content: '测试' }], tools: oneTool },
 )
 assert.equal(clean.chunks.find((c) => c.type === 'finish').reason.kind, 'stop')
 assert.ok(clean.chunks.some((c) => c.type === 'text-delta'))
-console.log('✅ 正常正文仍按 stop 结束')
+console.log('✅ 带工具时正常正文仍按 stop 结束，不误判为泄漏')
 
 // 整轮零产出 → EMPTY_RESPONSE（可重试），不再静默 stop
 const empty = await withMockServer(

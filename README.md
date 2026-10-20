@@ -19,7 +19,7 @@
    - `reasoning_content` → DSH `reasoning-delta`（原生深度思考折叠气泡渲染，边生成边推送）
    - `content` → DSH `text-delta`（工具回合的正文在反代解析完协议文本后一次性下发，避免半截标记）
    - `tool_calls` → DSH 原生 `tool-call-delta`
-5. **协议残留兜底**：若反代返回的正文里仍有未解析的工具协议标记（DSML / 文本协议），插件不再把它当普通回答静默结束回合，而是上报可重试错误 `PROTOCOL_LEAK`；整轮零产出（无正文、无思考、无调用）同样上报 `EMPTY_RESPONSE`，交给内核按重试策略处理。
+5. **协议残留兜底**：若反代在**带工具的回合**里返回了仍未解析的协议标记，插件不把它当正常回答静默结束，而是上报可重试的 `PROTOCOL_LEAK`，错误信息里带上泄漏通道（正文/思考）与后端判定（`protocolShape`）；整轮零产出（无正文、无思考、无调用）报 `EMPTY_RESPONSE` 交给内核重试。**不带工具的回合**（例如会话标题请求）里出现协议样式文本按合法正文放行——那正是用户可能让模型讲解协议或写这类代码的场景，判成错误会白烧两轮重试并把答案藏掉。
 6. **真实 token 计量**：请求带 `stream_options.include_usage`，反代把上游累计输出 token 挂在最后一个 chunk 上；插件只在拿不到真实值时才估算，且估算基数包含 system 提示与全部工具 schema，中文按 1 字符 1 token 计（旧实现一律 `/3`，输入侧被低报数倍）。
 7. **稳定错误码与中止语义**：HTTP 状态按内核词表分流 —— 401/403 `AUTH`、402 `QUOTA`、429 `RATE_LIMIT`（透传 `Retry-After`）、400/413/422 `INVALID_REQUEST`、上下文超长 `CONTEXT_WINDOW_EXCEEDED`、5xx `SERVER`、其余 `HTTP_<status>`；只有真正值得重试的码进 `retryableCodes`，用户点“停止”一律 `ABORTED`（不进重试）。
 8. **消息保真**：历史里的 `system` / `developer` 角色照样透传（旧实现只认 `options.system`，其余静默丢弃）；工具描述默认完整下发（旧实现砍成首行，`workflow` 曾丢 81% 说明）；图片等非文本 block 会显式告警，不再变成空串。
