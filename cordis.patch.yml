@@ -1,0 +1,22 @@
+# ============================================================================
+# dsh-deepseek-web-api —— 把 deepseek-web-api 网页私有 API 反代接入模型选择器
+# ============================================================================
+# 注意：仅作为 provider 路由接入模型选择器，不加入工具列表。
+#
+# 接入步骤：
+#   1. 执行 .\install.ps1 同步插件到 ~/.dsh/profiles/desktop/node_modules/dsh-deepseek-web-api
+#   2. 把下方 insert 块合进权威源 dsh-client-config\profiles\desktop\cordis.patch.yml
+#   3. 执行 python scripts\sync-profiles.py --profile desktop
+#   4. 重启 DeepSeek Harness.exe
+# ============================================================================
+
+- insert:
+    - id: dsh-deepseek-web-api-provider
+      name: dsh-deepseek-web-api/provider
+      config:
+        baseUrl: 'http://127.0.0.1:8787'
+        serverDir: 'C:\Users\Admin\DeepSeek_Harness\git-repo\deepseek-web-api'
+        autoStart: true
+        startTimeoutMs: 60000
+        maxContextWindow: 128000
+        defaultMaxTokens: 8192

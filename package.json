@@ -1,0 +1,34 @@
+{
+  "name": "dsh-deepseek-web-api",
+  "version": "0.1.0",
+  "description": "DeepSeek Web API (网页私有 API 反代) 作为 DSH 的 LLM 提供方接入模型选择器",
+  "type": "module",
+  "main": "lib/provider.js",
+  "exports": {
+    ".": "./lib/provider.js",
+    "./provider": "./lib/provider.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib",
+    "cordis.patch.yml",
+    "install.ps1",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "test": "node test/smoke.mjs"
+  },
+  "keywords": [
+    "dsh",
+    "deepseek-harness",
+    "dsh-plugin",
+    "deepseek-web-api",
+    "provider",
+    "llm"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "license": "MIT"
+}
