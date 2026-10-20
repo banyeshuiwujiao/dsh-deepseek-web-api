@@ -1,11 +1,12 @@
 import { existsSync, readFileSync } from "node:fs"
 import { createBackendManager, diffHealth } from "../lib/server.js"
+import { resolveLogFile } from "../lib/paths.js"
 import { DeepSeekWebApiAdapter } from "../lib/provider.js"
 
-const logFile = "C:\\Users\\Admin\\.dsh\\logs\\deepseek-web-api.log"
+// 路径一律走解析层：这个脚本要能在任何装了本仓库的机器上跑，不该出现某台机器的绝对路径。
+const logFile = resolveLogFile("~/.dsh/logs/deepseek-web-api.log")
 const opts = {
   baseUrl: "http://127.0.0.1:8787",
-  serverDir: "C:\\Users\\Admin\\DeepSeek_Harness\\git-repo\\deepseek-web-api",
   autoStart: true,
   startTimeoutMs: 90000,
   toolReasoning: "clean",
@@ -29,6 +30,7 @@ console.log("== 1) 由插件自己拉起后端（验证 spawnServer + env 注入
 const manager = createBackendManager(opts, logger)
 const health = await manager.ensure()
 console.log("ensure() ok; isRunning(spawned by us) =", manager.isRunning)
+console.log("解析到的后端目录:", manager.serverDir() || "(无)")
 console.log("后端自述:", JSON.stringify(health))
 const diff = diffHealth(health, opts)
 console.log("配置比对:", diff.stale ? "旧构建(stale)" : "可识别构建", "mismatches =", diff.mismatches.length)

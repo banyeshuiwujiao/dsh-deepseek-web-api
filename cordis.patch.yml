@@ -5,6 +5,7 @@
 #
 # 接入步骤：
 #   1. 执行 .\install.ps1 同步插件到 ~/.dsh/profiles/desktop/node_modules/dsh-deepseek-web-api
+#      （install.ps1 会把本机后端目录写进指针 ~/.dsh/deepseek-web-api.json，所以这里不用写绝对路径）
 #   2. 把下方 insert 块合进权威源 dsh-client-config\profiles\desktop\cordis.patch.yml
 #   3. 执行 python scripts\sync-profiles.py --profile desktop
 #   4. 重启 DeepSeek Harness.exe
@@ -14,8 +15,12 @@
     - id: dsh-deepseek-web-api-provider
       name: dsh-deepseek-web-api/provider
       config:
+        # 只允许回环：反代带着网页登录态，绑到 0.0.0.0 等于把账号交给整个网络。
         baseUrl: 'http://127.0.0.1:8787'
-        serverDir: 'C:\Users\Admin\DeepSeek_Harness\git-repo\deepseek-web-api'
+        # 后端目录故意留空——按 配置 serverDir → 环境变量 DSH_DEEPSEEK_WEB_API_DIR
+        # → 指针 ~/.dsh/deepseek-web-api.json → 插件同级 → home 常见位置 依次解析。
+        # 需要指明时写绝对路径或 ~ 开头的路径：
+        # serverDir: '~/DeepSeek_Harness/git-repo/deepseek-web-api'
         autoStart: true
         startTimeoutMs: 60000
         maxContextWindow: 128000
@@ -30,11 +35,17 @@
         healthTtlMs: 30000
         # 上游连续无数据的容忍上限，超时按可重试的 TIMEOUT 中止。0 = 不设上限。
         streamIdleTimeoutMs: 120000
-        # 填路径则把后端子进程输出落盘（超过 2MB 轮转 .1），便于事后取证；留空只留在内存尾部 20 行。
-        logFile: ''
+        # 后端子进程输出落盘（超过 2MB 轮转 .1），便于事后取证；留空只留在内存尾部 200 行。
+        logFile: '~/.dsh/logs/deepseek-web-api.log'
         # 托管（默认）：stdio 走管道，插件可 tail 日志并在 dispose 时按进程树回收（含后端起的 Chrome）；
         # 副作用是拉起者被强杀时后端会因 EPIPE 自行退出。detach: true 则相反——后端独立存活。
         detach: false
         killTreeOnDispose: true
         # 子进程环境默认白名单（OS 必需项 + DS_*）。确实还要透传别的变量时在这里点名变量名。
         passEnvKeys: []
+        # 能力契约：后端 /health 必须自述这些能力，缺了就拒绝复用（不静默退回旧故障）。
+        # 留空 = 用插件内置清单（dsml-tool-calls / protocol-switches / include-usage /
+        # health-self-description）。明知后端旧还想跑，把 strictBackend 设为 false。
+        strictBackend: true
+        requiredCapabilities: []
+        minBackendVersion: ''

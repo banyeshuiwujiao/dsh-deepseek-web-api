@@ -2,6 +2,13 @@
 #
 # 顺序是故意的：先验配置与测试，再看后端构建，最后才动运行时镜像。
 # 任何一步失败都立刻停止（$ErrorActionPreference = 'Stop'），不留半成品状态。
+#
+# 后端目录不再写死在本脚本里：不传 -BackendDir 就交给 lib/paths.js 的解析顺序
+# （环境变量 DSH_DEEPSEEK_WEB_API_DIR → 指针文件 → 插件同级 → home 常见位置），
+# 解析成功后把结果固化成指针 ~/.dsh/deepseek-web-api.json，供插件直接命中。
+param(
+  [string]$BackendDir = ""
+)
 $ErrorActionPreference = 'Stop'
 $src = Split-Path -Parent $PSCommandPath
 Set-Location $src
@@ -16,9 +23,41 @@ if ($LASTEXITCODE -ne 0) { throw "smoke 失败，停止" }
 node test/preparecall_regression.mjs
 if ($LASTEXITCODE -ne 0) { throw "prepareCall 回归失败，停止" }
 
-Write-Host "[3/5] 检查 deepseek-web-api 后端构建状态..."
-$backendDir = "C:\Users\Admin\DeepSeek_Harness\git-repo\deepseek-web-api"
+Write-Host "[3/5] 解析并检查 deepseek-web-api 后端..."
+$pathsModule = (Join-Path $src 'lib/paths.js') -replace '\\', '/'
+if ($BackendDir -ne "") {
+  # 显式指定：校验后写进指针，插件侧配置就不需要再出现绝对路径
+  $resolved = node --input-type=module -e "
+    import { existsSync } from 'node:fs'
+    import { join } from 'node:path'
+    import { writePointer, readGitRev, DEFAULT_POINTER_FILE } from 'file:///$pathsModule'
+    const dir = process.argv[1]
+    if (!existsSync(join(dir, 'dist', 'index.js'))) { console.error('NO_DIST'); process.exit(2) }
+    console.log(writePointer(DEFAULT_POINTER_FILE, dir, readGitRev(dir)))
+  " $BackendDir
+  if ($LASTEXITCODE -ne 0) { throw "指定的后端目录不合法（缺 dist/index.js）: $BackendDir" }
+  Write-Host "  指针已写入: $resolved"
+}
+# 读回解析结果（env → 指针 → 同级 → home 候选）
+$probe = node --input-type=module -e "
+  import { resolveServerDir } from 'file:///$pathsModule'
+  const r = resolveServerDir({})
+  console.log(JSON.stringify(r))
+"
+if ($LASTEXITCODE -ne 0) { throw "后端目录解析失败" }
+$info = $probe | ConvertFrom-Json
+if (-not $info.dir) { throw "解析不到 deepseek-web-api 后端目录（试过：$($info.notes -join ' | ')）。用 -BackendDir <路径> 指定一次，之后由指针文件接管。" }
+$backendDir = $info.dir
 $backendDist = Join-Path $backendDir "dist\index.js"
+Write-Host "  后端目录 = $backendDir（来源 $($info.source)）"
+if ($info.source -ne 'pointer') {
+  # 首次靠 env/同级/发现定位到，就固化成指针：下次不再依赖猜测顺序（也让人看得见是谁定的）。
+  $pinned = node --input-type=module -e "
+    import { writePointer, readGitRev, DEFAULT_POINTER_FILE } from 'file:///$pathsModule'
+    console.log(writePointer(DEFAULT_POINTER_FILE, process.argv[1], readGitRev(process.argv[1])))
+  " $backendDir
+  Write-Host "  指针已写入: $pinned"
+}
 if (-not (Test-Path $backendDist)) {
   Write-Host "  dist 不存在，正在构建 deepseek-web-api..."
   Push-Location $backendDir

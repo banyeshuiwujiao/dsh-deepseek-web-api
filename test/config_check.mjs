@@ -18,7 +18,6 @@ export const MODULE_NAME = 'dsh-deepseek-web-api/provider'
 /** 这些键必须存在；取值可以因地制宜（本机路径、开关值另有校验）。 */
 export const REQUIRED_KEYS = Object.freeze([
   'baseUrl',
-  'serverDir',
   'autoStart',
   'startTimeoutMs',
   'maxContextWindow',
@@ -32,7 +31,21 @@ export const REQUIRED_KEYS = Object.freeze([
   'detach',
   'killTreeOnDispose',
   'passEnvKeys',
+  'strictBackend',
+  'requiredCapabilities',
+  'minBackendVersion',
 ])
+
+/**
+ * 允许出现、但不该出现在**样板**里的键：它们要么是机器相关的绝对路径（改由解析层与指针文件
+ * 负责），要么是密钥这类绝不该入库的值。写进注释可以，写成生效配置就不行——
+ * 那样换台机器必须记得改这一处，正是 P2-4 要消掉的东西。
+ */
+export const SAMPLE_FORBIDDEN_KEYS = Object.freeze(['serverDir', 'apiKey', 'nodePath'])
+
+/** 本机绝对路径的形状：Windows 盘符 或 /home/<user>、/Users/<user>。 */
+// 用字符串构造：正则字面量里的 `/` 会提前结束表达式。
+const MACHINE_PATH = new RegExp(String.raw`(?:[A-Za-z]:[\\/][^\s'"]*(?:Users|home))|(?:/(?:Users|home)/[^/\s']+)`)
 
 /** 后端认识的开关取值，写错会让反代直接启动失败。 */
 const ENUMS = Object.freeze({
@@ -138,10 +151,34 @@ export function checkProviderBlock(text) {
   return { problems, keys }
 }
 
+/**
+ * 样板卫生检查：不许出现"某台机器的绝对路径"，也不许把机器相关的键写成生效配置。
+ * 注释行允许——教用户怎么指明本机位置正是注释的职责。
+ * @param {string} text
+ * @returns {string[]}
+ */
+export function checkSampleHygiene(text) {
+  const problems = []
+  text.split(/\r?\n/).forEach((line, index) => {
+    const trimmed = line.trim()
+    if (!trimmed || trimmed.startsWith('#')) return
+    const where = `第 ${index + 1} 行`
+    if (MACHINE_PATH.test(trimmed)) problems.push(`${where} 含本机绝对路径，换台机器就失效：${trimmed}`)
+    const key = trimmed.match(/^([A-Za-z][A-Za-z0-9_]*):/)?.[1]
+    if (key && SAMPLE_FORBIDDEN_KEYS.includes(key)) {
+      problems.push(`${where} 把 ${key} 写成了生效配置；应留空或注释掉，交给解析层与指针文件决定`)
+    }
+  })
+  return problems
+}
+
 /** 一次跑完全部检查。 */
-export function check(text) {
+export function check(text, { hygiene = true } = {}) {
   const block = checkProviderBlock(text)
-  return { problems: [...checkIndentation(text), ...block.problems], keys: block.keys }
+  return {
+    problems: [...checkIndentation(text), ...block.problems, ...(hygiene ? checkSampleHygiene(text) : [])],
+    keys: block.keys,
+  }
 }
 
 function main() {

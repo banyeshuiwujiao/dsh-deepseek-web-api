@@ -24,12 +24,17 @@ import {
 } from '../lib/provider.js'
 import { createBackendManager, diffHealth, resolveApiKey, resetApiKeyCache } from '../lib/server.js'
 import { ENV_BASE_ALLOWLIST, buildChildEnv, buildSpawnPlan, isAlive, killProcessTree } from '../lib/process.js'
-import { PROVIDER_ID as CONFIG_PROVIDER_ID, REQUIRED_KEYS, check as checkConfig } from './config_check.mjs'
+import { PROVIDER_ID as CONFIG_PROVIDER_ID, REQUIRED_KEYS, check as checkConfig, checkSampleHygiene } from './config_check.mjs'
+import { expandHome, readGitRev, readPointer, resolveLogFile, resolveServerDir, writePointer } from '../lib/paths.js'
+import { checkContract, compareVersions } from '../lib/contract.js'
+
+/** 满足能力契约的探活响应：新校验下，mock 后端必须自述能力才不会被判旧构建。 */
+const HEALTH_OK = { ok: true, version: '0.2.0', toolReasoning: 'clean', toolCalls: 'text', authReady: true, authAgeMs: 1, capabilities: ['dsml-tool-calls', 'protocol-switches', 'include-usage', 'health-self-description'] }
 
 const loggerProbe = { info() {}, warn: (m) => probeWarnings.push(m), debug() {} }
 const probeWarnings = []
 
-console.log('=== [1/15] 基础格式化：文本抽取与工具转换 ===')
+console.log('=== [1/17] 基础格式化：文本抽取与工具转换 ===')
 assert.equal(textOf('hello'), 'hello')
 assert.equal(textOf([{ type: 'text', text: 'part 1' }, { type: 'text', text: 'part 2' }]), 'part 1\npart 2')
 
@@ -97,7 +102,7 @@ assert.equal(formatOpenAiTools([]), undefined)
 assert.equal(clampDescription(multiLine, 8), '执行 PowerShell'.slice(0, 8) + '…')
 assert.equal(formatOpenAiTools([{ name: 'x', description: multiLine }], 6)[0].function.description, '执行 Pow…')
 
-console.log('=== [2/15] Token 估算与错误码归一 ===')
+console.log('=== [2/17] Token 估算与错误码归一 ===')
 // 中文不再被 /3 低报：CJK 按 1 字符 1 token
 assert.equal(estimateTokens('中文测试'), 4)
 assert.equal(estimateTokens('abcd'), 1)
@@ -125,7 +130,7 @@ assert.equal(resolveThinkingEnabled('deepseek-web-flash'), false)
 assert.equal(resolveThinkingEnabled('deepseek-reasoner'), true)
 assert.equal(resolveThinkingEnabled('my-flash-clone'), false)
 
-console.log('=== [3/15] Provider 契约与 Cordis apply 注册 ===')
+console.log('=== [3/17] Provider 契约与 Cordis apply 注册 ===')
 const fakeCtx = {
   llm: {
     registeredProviders: null,
@@ -174,7 +179,7 @@ for (const code of ['EMPTY_RESPONSE', 'RATE_LIMIT', 'SERVER', 'TIMEOUT', 'TRANSP
 // 内核读的是扁平 backoff 字段，不是嵌套对象
 assert.ok(Number.isFinite(policy.initialDelayMs) && Number.isFinite(policy.maxDelayMs))
 
-console.log('=== [4/15] 模型列表与 resolveModel / prepareCall ===')
+console.log('=== [4/17] 模型列表与 resolveModel / prepareCall ===')
 const models = await adapter.listModels(PROVIDER_ID)
 assert.ok(models.length >= 2, '模型列表数量不足')
 assert.ok(models.some((m) => m.id === 'deepseek-web-flash'))
@@ -194,7 +199,7 @@ assert.equal(typeof prepared.stream, 'function')
 // 已经中止的 signal 不该再发起请求
 await assert.rejects(() => adapter.prepareCall(PROVIDER_ID, 'deepseek-web-flash', { aborted: true }))
 
-console.log('=== [5/15] SSE 增量 → DSH StreamChunk（Mock Server）===')
+console.log('=== [5/17] SSE 增量 → DSH StreamChunk（Mock Server）===')
 
 /** 起一个 mock 反代：记录上线请求，按给定 SSE 行回放。 */
 async function withMockServer(lines, run, options = {}) {
@@ -202,7 +207,7 @@ async function withMockServer(lines, run, options = {}) {
   const srv = createServer((req, res) => {
     if (req.url === '/health') {
       res.writeHead(200, { 'Content-Type': 'application/json' })
-      res.end(JSON.stringify({ ok: true }))
+      res.end(JSON.stringify(HEALTH_OK))
       return
     }
     if (options.hang === true) {
@@ -314,7 +319,7 @@ assert.equal(estimatedUsage[0].usage.outputTokens, estimateTokens('中文回答'
 assert.equal(estimated.chunks.find((c) => c.type === 'finish').reason.kind, 'stop')
 assert.ok(!('max_tokens' in estimated.seen.body), '未指定时不该硬塞 max_tokens')
 
-console.log('=== [6/15] 兜底：协议残留 / 空回合 / 状态码 / 中止 ===')
+console.log('=== [6/17] 兜底：协议残留 / 空回合 / 状态码 / 中止 ===')
 const BAR = String.fromCharCode(0xff5c)
 const LEAK = `${BAR}${BAR}DSML${BAR}${BAR}`
 
@@ -411,7 +416,7 @@ for await (const chunk of preAborted.stream('deepseek-web-flash', { messages: []
 }
 assert.equal(preChunks[0].reason.kind, 'aborted')
 
-console.log('=== [7/15] 后端不可用时的错误口径 ===')
+console.log('=== [7/17] 后端不可用时的错误口径 ===')
 const offline = new DeepSeekWebApiAdapter({ baseUrl: 'http://127.0.0.1:1', autoStart: false })
 const offlineChunks = []
 for await (const chunk of offline.stream('deepseek-web-flash', { messages: [{ role: 'user', content: 'x' }] })) {
@@ -422,7 +427,7 @@ assert.equal(offlineFinish.reason.kind, 'error')
 assert.ok(['TRANSPORT', 'SERVER'].includes(offlineFinish.reason.failure.code))
 console.log('✅ 后端不可达:', offlineFinish.reason.failure.code)
 
-console.log('=== [8/15] 工具调用按 index 累积 / 流空闲超时 ===')
+console.log('=== [8/17] 工具调用按 index 累积 / 流空闲超时 ===')
 
 // 反代今天一个 chunk 给完整数组；若上游改成标准分片（同 index 多次追加），必须合成一个完整调用。
 const fragmented = await withMockServer(
@@ -460,7 +465,7 @@ assert.deepEqual(multiCalls.map((c) => c.argumentsDelta), ['{"p":1}', '{"p":2}']
   const srv = createServer((req, res) => {
     if (req.url === '/health') {
       res.writeHead(200, { 'Content-Type': 'application/json' })
-      res.end(JSON.stringify({ ok: true, version: '0.1.0', toolReasoning: 'clean', toolCalls: 'text', authReady: true, authAgeMs: 1 }))
+      res.end(JSON.stringify(HEALTH_OK))
       return
     }
     // 只发一头就不结束，逼出空闲超时路径
@@ -484,7 +489,7 @@ assert.deepEqual(multiCalls.map((c) => c.argumentsDelta), ['{"p":1}', '{"p":2}']
   console.log('✅ 流空闲超时上报 TIMEOUT（可重试）')
 }
 
-console.log('=== [9/15] 探活缓存与复用实例的配置比对 ===')
+console.log('=== [9/17] 探活缓存与复用实例的配置比对 ===')
 // /health 自述信息与插件配置比对：不一致必须报出来，旧构建要判为 stale
 assert.equal(diffHealth(null, { toolReasoning: 'clean' }).stale, true)
 assert.deepEqual(diffHealth({ version: '0.1.0' }, {}).mismatches, [])
@@ -502,7 +507,7 @@ assert.ok(mismatch.mismatches.some((m) => m.includes('authReady')))
     if (req.url === '/health') {
       healthHits++
       res.writeHead(200, { 'Content-Type': 'application/json' })
-      res.end(JSON.stringify({ ok: true, version: '0.1.0', toolReasoning: 'clean', toolCalls: 'text', authReady: true, authAgeMs: 1 }))
+      res.end(JSON.stringify(HEALTH_OK))
       return
     }
     res.writeHead(404).end()
@@ -510,7 +515,7 @@ assert.ok(mismatch.mismatches.some((m) => m.includes('authReady')))
   await new Promise((resolve) => srv.listen(0, '127.0.0.1', resolve))
   const manager = createBackendManager({ baseUrl: `http://127.0.0.1:${srv.address().port}`, autoStart: false, healthTtlMs: 60000 }, loggerProbe)
   const first = await manager.ensure()
-  assert.equal(first.version, '0.1.0')
+  assert.equal(first.version, HEALTH_OK.version)
   await manager.ensure()
   await manager.ensure()
   assert.equal(healthHits, 1, `13 步会话每次都探活的问题没解决：hits=${healthHits}`)
@@ -519,7 +524,7 @@ assert.ok(mismatch.mismatches.some((m) => m.includes('authReady')))
   console.log('✅ /health 结果按 TTL 复用，探活次数 =', healthHits)
 }
 
-console.log('=== [10/15] 拉起策略：托管 pipes vs detach 解耦 ===')
+console.log('=== [10/17] 拉起策略：托管 pipes vs detach 解耦 ===')
 assert.equal(isAlive(process.pid), true)
 assert.equal(isAlive(0), false)
 assert.equal(isAlive(-1), false)
@@ -540,7 +545,7 @@ assert.equal(detachedQuiet.detached, true)
 const detachedLogged = buildSpawnPlan({ serverDir: 'X:/srv', detach: true, logFile: 'X:/log.txt' }, { stdout: 7, stderr: 8 })
 assert.deepEqual(detachedLogged.stdio, ['ignore', 7, 8])
 
-console.log('=== [11/15] 进程树回收：孙进程必须一起带走 ===')
+console.log('=== [11/17] 进程树回收：孙进程必须一起带走 ===')
 // 复现真机泄漏的形态：父进程再起一个孙进程（后端 -> headless Chrome 就是这个形状）。
 // 旧的 child.kill() 只杀父，孙进程变孤儿继续占 CDP 端口。
 const grandScript = 'const{spawn}=require("child_process");'
@@ -576,7 +581,7 @@ await new Promise((r) => ghost.once('exit', r))
 const ghostResult = killProcessTree(ghost.pid)
 assert.equal(ghostResult.ok, true, `杀已退出的进程应幂等成功: ${ghostResult.detail}`)
 
-console.log('=== [12/15] detach 才真解耦：托管后端会随拉起它的那个进程退出而被 EPIPE 带走 ===')
+console.log('=== [12/17] detach 才真解耦：托管后端会随拉起它的那个进程退出而被 EPIPE 带走 ===')
 // 用一个会持续写 stdout 的桩"后端"复现真实形状（真后端 = node dist/index.js start + 心跳日志）。
 // 托管模式 stdio 是管道：拉起者一退，管道断裂，桩进程因 EPIPE 自杀；detach 模式必须活下来。
 const stubDir = mkdtempSync(join(tmpdir(), 'dwb-lifecycle-'))
@@ -586,7 +591,8 @@ writeFileSync(join(stubDir, 'dist', 'index.js'), [
   'const port = Number(process.env.PORT || 0)',
   'createServer((req, res) => {',
   '  res.writeHead(200, { "content-type": "application/json" })',
-  '  res.end(JSON.stringify({ ok: true, version: "0.0.0-stub", toolReasoning: "clean", toolCalls: "text", authReady: true, authAgeMs: 1 }))',
+  '  res.end(JSON.stringify({ ok: true, version: "0.2.0-stub", toolReasoning: "clean", toolCalls: "text",',
+  '    authReady: true, authAgeMs: 1, capabilities: ["dsml-tool-calls", "protocol-switches", "include-usage", "health-self-description"] }))',
   '}).listen(port, "127.0.0.1")',
   'setInterval(() => console.log("heartbeat " + Date.now()), 120)',
   '',
@@ -650,7 +656,7 @@ try {
   const detachPid = Number((detachOut.match(/PID=(\d+)/) || [])[1])
   spawnedStubs.push(detachPid)
   assert.ok(detachPid > 0, `没拿到 detach 后端的 PID: ${detachOut}`)
-  assert.match(detachOut, /HEALTH=0\.0\.0-stub/)
+  assert.match(detachOut, /HEALTH=0\.2\.0-stub/)
   await new Promise((r) => setTimeout(r, 1200))
   assert.equal(await healthy(portDetach), true, 'detach 模式下后端随拉起者一起没了')
   killProcessTree(detachPid, { force: true })
@@ -664,7 +670,7 @@ try {
   assert.ok(supervisedPid > 0, `没拿到托管后端的 PID: ${supervisedOut}`)
   // 拉起者退出前它确实健康过（wrapper 里 ensure() 成功并回打了 version）；
   // 退出后立刻健康检查是没意义的——管道一断它就死，那正是本例要证明的耦合。
-  assert.match(supervisedOut, /HEALTH=0\.0\.0-stub/)
+  assert.match(supervisedOut, /HEALTH=0\.2\.0-stub/)
   let died = false
   const stopAt = Date.now() + 8000
   while (Date.now() < stopAt) {
@@ -684,7 +690,7 @@ try {
   }
 }
 
-console.log('=== [13/15] 子进程环境变量白名单 ===')
+console.log('=== [13/17] 子进程环境变量白名单 ===')
 const hostEnv = {
   PATH: 'C:\\Windows\\system32',
   SYSTEMROOT: 'C:\\Windows',
@@ -723,7 +729,7 @@ assert.ok(built.keys.every((k) => ENV_BASE_ALLOWLIST.includes(k) || k.startsWith
 assert.equal(buildChildEnv({ WEIRD: 'v', OTHER: 'x' }, { extraKeys: ['WEIRD'] }).env.WEIRD, 'v')
 assert.ok(!('OTHER' in buildChildEnv({ WEIRD: 'v', OTHER: 'x' }, { extraKeys: ['WEIRD'] }).env))
 
-console.log('=== [14/15] API Key 解析优先级、mtime 缓存与缺失告警 ===')
+console.log('=== [14/17] API Key 解析优先级、mtime 缓存与缺失告警 ===')
 // 让本段与宿主环境无关（DS_API_KEY 会参与优先级）
 const savedDsKey = process.env.DS_API_KEY
 delete process.env.DS_API_KEY
@@ -785,7 +791,7 @@ try {
   resetApiKeyCache()
 }
 
-console.log('=== [15/15] 配置样板自检（守门员也要有人守）===')
+console.log('=== [15/17] 配置样板自检（守门员也要有人守）===')
 // 正例：仓库里的样板必须无问题，且必需键齐全
 const sampleText = readFileSync(fileURLToPath(new URL('../cordis.patch.yml', import.meta.url)), 'utf8')
 const sampleCheck = checkConfig(sampleText)
@@ -814,7 +820,161 @@ assert.ok(publicBind.problems.some((p) => p.includes('回环')), 'baseUrl 绑到
 // 开关取值非法会让反代启动即失败
 const badEnum = checkConfig(sampleText.replace("toolReasoning: 'clean'", "toolReasoning: 'loud'"))
 assert.ok(badEnum.problems.some((p) => p.includes('toolReasoning')), '非法 toolReasoning 没被抓住')
-console.log('✅ 配置自检：正例通过，Tab / 缺键 / 缺入口 / 公网绑定 / 非法枚举 全部被抓住')
+
+// 样板卫生：换机器即废的本机绝对路径、以及 serverDir/apiKey 这类机器相关键写成生效配置
+assert.deepEqual(checkSampleHygiene(sampleText), [], '样板自己就不该可移植性不达标')
+for (const line of [
+  `serverDir: 'C:\\Users\\me\\git-repo\\deepseek-web-api'`,
+  "logFile: '/home/me/.dsh/logs/a.log'",
+  "apiKey: 'sk-secret'",
+]) {
+  assert.ok(checkSampleHygiene(line).length > 0, `本机相关内容没被拦住: ${line}`)
+}
+assert.deepEqual(checkSampleHygiene("logFile: '~/.dsh/logs/a.log'"), [], '~ 开头的路径不该被误拦')
+assert.deepEqual(checkSampleHygiene('# serverDir: whatever'), [], '注释里的示例不该被误拦')
+// 把注释里的 serverDir 变成生效配置，必须立刻红
+assert.ok(checkSampleHygiene(sampleText.replace('# serverDir:', 'serverDir:')).length > 0, '生效的 serverDir 没被拦住')
+console.log('✅ 配置自检：正例通过，Tab / 缺键 / 缺入口 / 公网绑定 / 非法枚举 / 本机绝对路径 全部被抓住')
+
+console.log('=== [16/17] 后端目录与日志路径解析（可移植性）===')
+{
+  const root = mkdtempSync(join(tmpdir(), 'dwb-paths-'))
+  const mkBackend = (rel) => {
+    const dir = join(root, rel)
+    mkdirSync(join(dir, 'dist'), { recursive: true })
+    writeFileSync(join(dir, 'dist', 'index.js'), '// stub', 'utf8')
+    return dir
+  }
+  const home = join(root, 'home')
+  const configured = mkBackend('cfg/deepseek-web-api')
+  const fromEnv = mkBackend('envside/deepseek-web-api')
+  const discovered = mkBackend('home/DeepSeek_Harness/git-repo/deepseek-web-api')
+  void discovered
+
+  // 1) 配置优先
+  const first = resolveServerDir({ serverDir: configured }, { home, env: {} })
+  assert.equal(first.dir, configured)
+  assert.equal(first.source, 'config')
+
+  // 2) 配置指向的目录不可用时**不一票否决**：继续往下找，并把这件事记进 notes
+  //    （换机器时"忘了改配置里的绝对路径"是常态，直接失败等于把可移植性锁回手改）
+  const second = resolveServerDir(
+    { serverDir: join(root, 'does-not-exist') },
+    { home, env: { DSH_DEEPSEEK_WEB_API_DIR: fromEnv } },
+  )
+  assert.equal(second.dir, fromEnv)
+  assert.equal(second.source, 'env:DSH_DEEPSEEK_WEB_API_DIR')
+  assert.ok(second.notes.some((n) => n.includes('没有 dist/index.js')), '过期配置没有被记录')
+
+  // 3) 指针文件（install.ps1 写的那个）
+  const pointerFile = join(root, 'pointer.json')
+  writePointer(pointerFile, configured, 'abc1234')
+  const third = resolveServerDir({ pointerFile }, { home, env: {} })
+  assert.equal(third.dir, configured)
+  assert.equal(third.source, 'pointer')
+  assert.ok(third.notes.some((n) => n.includes('abc1234')), '指针里的 git 版本没被带出来')
+  const round = readPointer(pointerFile)
+  assert.equal(round.serverDir, configured)
+  assert.equal(round.gitRev, 'abc1234')
+
+  // 4) 什么都没配 → 在 home 常见位置里发现
+  //    注意 pointerFile 必须放在第一个参数里：它是 resolveServerDir 的配置项而不是 io 依赖，
+  //    传错位置会回落到本机真实指针文件，测试就变成"恰好这台机器还没有指针"才通过。
+  const fourth = resolveServerDir({ pointerFile: join(root, 'nope.json') }, { home, env: {} })
+  assert.equal(fourth.dir, discovered)
+  assert.equal(fourth.source, 'discover')
+
+  // 5) 全都没有 → 空结果 + 把找过的位置说出来，并给出可操作报错
+  const nothing = resolveServerDir(
+    { serverDir: join(root, 'ghost'), pointerFile: join(root, 'none.json') },
+    { home: join(root, 'empty-home'), env: {} },
+  )
+  assert.equal(nothing.dir, '')
+  assert.equal(nothing.source, 'none')
+  assert.ok(nothing.notes.some((n) => n.includes('已尝试')), '失败时没交代找过哪些位置')
+
+  // 6) 路径展开：~ 走 home，绝对路径原样；空值表示不落盘
+  assert.equal(expandHome('~/.dsh/logs/a.log', '/virtual/home'), join('/virtual/home', '.dsh/logs/a.log'))
+  assert.equal(expandHome('', '/virtual/home'), '')
+  assert.equal(resolveLogFile('~/x.log', '/virtual/home'), join('/virtual/home', 'x.log'))
+  assert.equal(resolveLogFile('', '/virtual/home'), '')
+
+  // 7) 不是 git 仓库的目录不该抛
+  assert.equal(readGitRev(root), null)
+  assert.equal(readGitRev(''), null)
+
+  rmSync(root, { recursive: true, force: true })
+  console.log('✅ 解析顺序：配置 → env → 指针 → 发现；过期配置只记录不否决')
+}
+
+console.log('=== [17/17] 后端能力契约：旧构建拒绝复用而不是静默退化 ===')
+{
+  const full = {
+    ok: true,
+    version: '0.2.0',
+    toolReasoning: 'clean',
+    toolCalls: 'text',
+    authReady: true,
+    capabilities: ['dsml-tool-calls', 'protocol-switches', 'include-usage', 'health-self-description'],
+  }
+  assert.equal(checkContract(full).ok, true)
+  assert.equal(checkContract({ ...full, capabilities: ['protocol-switches'] }).ok, false)
+  assert.ok(
+    checkContract({ ...full, capabilities: ['protocol-switches'] }).problems.some((p) => p.includes('dsml-tool-calls')),
+    '缺失能力没被点名',
+  )
+  // 旧构建连 capabilities 都不自述：判为不可信，并给出 pnpm build 的下一步
+  const legacy = checkContract({ ok: true, version: '0.1.0' })
+  assert.equal(legacy.unknown, true)
+  assert.equal(legacy.ok, false)
+  assert.ok(legacy.problems.join(' ').includes('pnpm build'), '报错没给出下一步动作')
+  // 版本比较：只在能力清单可信时才参与判断
+  assert.equal(compareVersions('0.2.0', '0.2.0'), 0)
+  assert.equal(compareVersions('0.1.9', '0.2.0'), -1)
+  assert.equal(compareVersions('0.2.1', '0.2.0'), 1)
+  assert.equal(compareVersions('weird', '0.2.0'), null)
+  assert.ok(checkContract({ ...full, version: '0.1.0' }).problems.some((p) => p.includes('低于')))
+  // 自定义依赖清单（例如只要协议开关）要能被尊重
+  assert.equal(checkContract(full, { requiredCapabilities: ['protocol-switches'], minBackendVersion: '' }).ok, true)
+
+  // 真接一次：/health 没有 capabilities 的后端
+  async function ensureAgainst(health, opts) {
+    const srv = createServer((req, res) => {
+      if (req.url === '/health') {
+        res.writeHead(200, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify(health))
+        return
+      }
+      res.writeHead(404).end()
+    })
+    await new Promise((resolve) => srv.listen(0, '127.0.0.1', resolve))
+    const manager = createBackendManager({
+      baseUrl: `http://127.0.0.1:${srv.address().port}`,
+      autoStart: false,
+      healthTtlMs: 0,
+      ...opts,
+    }, { info() {}, warn() {}, debug() {} })
+    try {
+      return { ok: true, health: await manager.ensure() }
+    } catch (error) {
+      return { ok: false, error }
+    } finally {
+      await new Promise((resolve) => srv.close(resolve))
+    }
+  }
+
+  const refused = await ensureAgainst({ ok: true, version: '0.1.0' }, {})
+  assert.equal(refused.ok, false, '旧后端竟然通过了契约校验')
+  assert.equal(refused.error.failureCode, 'BACKEND_STALE')
+  assert.match(refused.error.message, /能力契约/)
+
+  const tolerated = await ensureAgainst({ ok: true, version: '0.1.0' }, { strictBackend: false })
+  assert.equal(tolerated.ok, true, 'strictBackend=false 时应放行（只告警）')
+
+  const accepted = await ensureAgainst(full, {})
+  assert.equal(accepted.ok, true)
+  console.log('✅ 契约不满足 → BACKEND_STALE（不可重试）；strictBackend=false 可降级为告警')
+}
 
 // 触发 dispose
 fakeCtx.events.dispose?.()
