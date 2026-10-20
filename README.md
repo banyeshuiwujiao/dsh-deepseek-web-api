@@ -26,7 +26,11 @@
 11. **空闲超时**：上游连续 `streamIdleTimeoutMs`（默认 120s）不吐字节，按可重试的 `TIMEOUT` 中止，不再无限挂着。
 12. **复用实例可辨识**：`GET /health` 现在自述 `version` 与生效中的 `toolReasoning`/`toolCalls`，插件据此比对自身配置——跑的是旧构建或开关不一致会 `logger.warn`（真机上就吃过"复用手工起的旧进程、注入的开关从未生效"的亏）。探活结果按 `healthTtlMs` 缓存，长会话不再每步探活。
 13. **每轮一行统计 + 可选日志落盘**：`logger.debug` 输出 `ttft / reasonChars / contentChars / toolCalls / usage / conversation / outcome`；配置 `logFile` 后后端子进程输出写文件（>2MB 轮转 `.1`），事后能取证。
-14. **不污染工具列表**：遵循 DSH 设计哲学，不导出任何 Action 工具。
+14. **进程生命周期两种语义**：
+   - 托管（默认）：后端子进程走 stdio 管道，插件能 `tail` 最近日志、能在 dispose 时用 `taskkill /T` **按进程树回收**（连带后端自己起的 headless Chrome，不再留下占着 CDP 端口的孤儿）。代价是这层耦合是**双向**的：拉起插件的进程一旦被强杀，管道断裂会让后端因 EPIPE 自行退出——对 DSH「宿主退出=服务停」是正确行为。
+   - `detach: true`：后端进独立进程组、stdio 落 `logFile` 或忽略，`unref` 后插件退出/卸载都不碰它。适合"起了就一直给客户端复用"，也是 `test/live_e2e.mjs` 用的模式。
+   - `killTreeOnDispose: false` 可退回只杀直接子进程的旧行为。
+15. **不污染工具列表**：遵循 DSH 设计哲学，不导出任何 Action 工具。
 
 ---
 
@@ -63,6 +67,8 @@ cd C:\Users\Admin\DeepSeek_Harness\dsh-client-config\plugins\dsh-deepseek-web-ap
         healthTtlMs: 30000       # /health 缓存，避免每步都探活；0 = 每次都探活
         streamIdleTimeoutMs: 120000  # 上游无数据的容忍上限，超时按 TIMEOUT 重试
         logFile: ''              # 填路径则后端输出落盘（>2MB 轮转 .1）
+        detach: false            # true = 后端独立存活，插件退出不牵连它
+        killTreeOnDispose: true  # 托管模式 dispose 连带回收 Chrome 等孙进程
 ```
 
 > `defaultMaxTokens` 不会真的限制输出：网页端上游不接受 token 上限（反代 `docs/api.md` 已说明），

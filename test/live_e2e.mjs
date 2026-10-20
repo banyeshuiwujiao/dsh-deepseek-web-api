@@ -13,6 +13,9 @@ const opts = {
   defaultMaxTokens: 32768,
   healthTtlMs: 0,
   logFile,
+  // detach：脚本退出后后端要继续存活给 DSH 客户端复用。
+  // 托管模式下父进程一退，管道断裂会把后端 EPIPE 打死（上一版就是这样把 8787 弄没的）。
+  detach: true,
 }
 
 const warnings = []

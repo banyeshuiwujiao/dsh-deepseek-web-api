@@ -1,5 +1,10 @@
 import assert from 'node:assert/strict'
+import { spawn } from 'node:child_process'
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { createServer } from 'node:http'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import {
   PROVIDER_ID,
   PROVIDER_LABEL,
@@ -18,11 +23,12 @@ import {
   resolveThinkingEnabled,
 } from '../lib/provider.js'
 import { createBackendManager, diffHealth } from '../lib/server.js'
+import { buildSpawnPlan, isAlive, killProcessTree } from '../lib/process.js'
 
 const loggerProbe = { info() {}, warn: (m) => probeWarnings.push(m), debug() {} }
 const probeWarnings = []
 
-console.log('=== [1/9] 基础格式化：文本抽取与工具转换 ===')
+console.log('=== [1/12] 基础格式化：文本抽取与工具转换 ===')
 assert.equal(textOf('hello'), 'hello')
 assert.equal(textOf([{ type: 'text', text: 'part 1' }, { type: 'text', text: 'part 2' }]), 'part 1\npart 2')
 
@@ -90,7 +96,7 @@ assert.equal(formatOpenAiTools([]), undefined)
 assert.equal(clampDescription(multiLine, 8), '执行 PowerShell'.slice(0, 8) + '…')
 assert.equal(formatOpenAiTools([{ name: 'x', description: multiLine }], 6)[0].function.description, '执行 Pow…')
 
-console.log('=== [2/9] Token 估算与错误码归一 ===')
+console.log('=== [2/12] Token 估算与错误码归一 ===')
 // 中文不再被 /3 低报：CJK 按 1 字符 1 token
 assert.equal(estimateTokens('中文测试'), 4)
 assert.equal(estimateTokens('abcd'), 1)
@@ -118,7 +124,7 @@ assert.equal(resolveThinkingEnabled('deepseek-web-flash'), false)
 assert.equal(resolveThinkingEnabled('deepseek-reasoner'), true)
 assert.equal(resolveThinkingEnabled('my-flash-clone'), false)
 
-console.log('=== [3/9] Provider 契约与 Cordis apply 注册 ===')
+console.log('=== [3/12] Provider 契约与 Cordis apply 注册 ===')
 const fakeCtx = {
   llm: {
     registeredProviders: null,
@@ -167,7 +173,7 @@ for (const code of ['EMPTY_RESPONSE', 'RATE_LIMIT', 'SERVER', 'TIMEOUT', 'TRANSP
 // 内核读的是扁平 backoff 字段，不是嵌套对象
 assert.ok(Number.isFinite(policy.initialDelayMs) && Number.isFinite(policy.maxDelayMs))
 
-console.log('=== [4/9] 模型列表与 resolveModel / prepareCall ===')
+console.log('=== [4/12] 模型列表与 resolveModel / prepareCall ===')
 const models = await adapter.listModels(PROVIDER_ID)
 assert.ok(models.length >= 2, '模型列表数量不足')
 assert.ok(models.some((m) => m.id === 'deepseek-web-flash'))
@@ -187,7 +193,7 @@ assert.equal(typeof prepared.stream, 'function')
 // 已经中止的 signal 不该再发起请求
 await assert.rejects(() => adapter.prepareCall(PROVIDER_ID, 'deepseek-web-flash', { aborted: true }))
 
-console.log('=== [5/9] SSE 增量 → DSH StreamChunk（Mock Server）===')
+console.log('=== [5/12] SSE 增量 → DSH StreamChunk（Mock Server）===')
 
 /** 起一个 mock 反代：记录上线请求，按给定 SSE 行回放。 */
 async function withMockServer(lines, run, options = {}) {
@@ -307,7 +313,7 @@ assert.equal(estimatedUsage[0].usage.outputTokens, estimateTokens('中文回答'
 assert.equal(estimated.chunks.find((c) => c.type === 'finish').reason.kind, 'stop')
 assert.ok(!('max_tokens' in estimated.seen.body), '未指定时不该硬塞 max_tokens')
 
-console.log('=== [6/9] 兜底：协议残留 / 空回合 / 状态码 / 中止 ===')
+console.log('=== [6/12] 兜底：协议残留 / 空回合 / 状态码 / 中止 ===')
 const BAR = String.fromCharCode(0xff5c)
 const LEAK = `${BAR}${BAR}DSML${BAR}${BAR}`
 
@@ -404,7 +410,7 @@ for await (const chunk of preAborted.stream('deepseek-web-flash', { messages: []
 }
 assert.equal(preChunks[0].reason.kind, 'aborted')
 
-console.log('=== [7/9] 后端不可用时的错误口径 ===')
+console.log('=== [7/12] 后端不可用时的错误口径 ===')
 const offline = new DeepSeekWebApiAdapter({ baseUrl: 'http://127.0.0.1:1', autoStart: false })
 const offlineChunks = []
 for await (const chunk of offline.stream('deepseek-web-flash', { messages: [{ role: 'user', content: 'x' }] })) {
@@ -415,7 +421,7 @@ assert.equal(offlineFinish.reason.kind, 'error')
 assert.ok(['TRANSPORT', 'SERVER'].includes(offlineFinish.reason.failure.code))
 console.log('✅ 后端不可达:', offlineFinish.reason.failure.code)
 
-console.log('=== [8/9] 工具调用按 index 累积 / 流空闲超时 ===')
+console.log('=== [8/12] 工具调用按 index 累积 / 流空闲超时 ===')
 
 // 反代今天一个 chunk 给完整数组；若上游改成标准分片（同 index 多次追加），必须合成一个完整调用。
 const fragmented = await withMockServer(
@@ -477,7 +483,7 @@ assert.deepEqual(multiCalls.map((c) => c.argumentsDelta), ['{"p":1}', '{"p":2}']
   console.log('✅ 流空闲超时上报 TIMEOUT（可重试）')
 }
 
-console.log('=== [9/9] 探活缓存与复用实例的配置比对 ===')
+console.log('=== [9/12] 探活缓存与复用实例的配置比对 ===')
 // /health 自述信息与插件配置比对：不一致必须报出来，旧构建要判为 stale
 assert.equal(diffHealth(null, { toolReasoning: 'clean' }).stale, true)
 assert.deepEqual(diffHealth({ version: '0.1.0' }, {}).mismatches, [])
@@ -510,6 +516,171 @@ assert.ok(mismatch.mismatches.some((m) => m.includes('authReady')))
   manager.dispose()
   await new Promise((resolve) => srv.close(resolve))
   console.log('✅ /health 结果按 TTL 复用，探活次数 =', healthHits)
+}
+
+console.log('=== [10/12] 拉起策略：托管 pipes vs detach 解耦 ===')
+assert.equal(isAlive(process.pid), true)
+assert.equal(isAlive(0), false)
+assert.equal(isAlive(-1), false)
+assert.equal(isAlive('nope'), false)
+
+// 托管：pipes（能 tail/落盘），dispose 时按进程树回收
+const supervised = buildSpawnPlan({ serverDir: 'X:/srv' })
+assert.deepEqual(supervised.stdio, ['ignore', 'pipe', 'pipe'])
+assert.equal(supervised.detached, false)
+assert.equal(supervised.cwd, 'X:/srv')
+
+// detach 但不落日志：stdio 必须全 ignore，否则宿主退出时管道断裂会把后端 EPIPE 打死
+const detachedQuiet = buildSpawnPlan({ serverDir: 'X:/srv', detach: true })
+assert.deepEqual(detachedQuiet.stdio, ['ignore', 'ignore', 'ignore'])
+assert.equal(detachedQuiet.detached, true)
+
+// detach 且配了 logFile：直接把子进程 stdio 接到日志 fd 上
+const detachedLogged = buildSpawnPlan({ serverDir: 'X:/srv', detach: true, logFile: 'X:/log.txt' }, { stdout: 7, stderr: 8 })
+assert.deepEqual(detachedLogged.stdio, ['ignore', 7, 8])
+
+console.log('=== [11/12] 进程树回收：孙进程必须一起带走 ===')
+// 复现真机泄漏的形态：父进程再起一个孙进程（后端 -> headless Chrome 就是这个形状）。
+// 旧的 child.kill() 只杀父，孙进程变孤儿继续占 CDP 端口。
+const grandScript = 'const{spawn}=require("child_process");'
+  + 'const kid=spawn(process.execPath,["-e","globalThis.x=setInterval(()=>{},1000)"],{stdio:"ignore",windowsHide:true,detached:process.platform!=="win32"});'
+  + 'console.log(kid.pid);globalThis.y=setInterval(()=>{},1000)'
+const parent = spawn(process.execPath, ['-e', grandScript], { stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true })
+let grandchildPid = 0
+const waitPidLine = new Promise((resolve) => {
+  parent.stdout.once('data', (buf) => resolve(Number(String(buf).split('\n')[0].trim())))
+})
+grandchildPid = await waitPidLine
+assert.ok(grandchildPid > 0, '没拿到孙进程 PID')
+await new Promise((r) => setTimeout(r, 300))
+assert.equal(isAlive(parent.pid), true)
+assert.equal(isAlive(grandchildPid), true, '孙进程没起来，测例无效')
+
+const killed = killProcessTree(parent.pid, { force: true })
+assert.equal(killed.method, process.platform === 'win32' ? 'taskkill' : 'process-group')
+// 等它真的没了（Windows 上 taskkill 是同步的，但仍按结果断言而不是靠时序）
+const deadline = Date.now() + 5000
+while ((isAlive(parent.pid) || isAlive(grandchildPid)) && Date.now() < deadline) {
+  await new Promise((r) => setTimeout(r, 120))
+}
+assert.equal(isAlive(parent.pid), false, `父进程仍存活 PID=${parent.pid}`)
+assert.equal(isAlive(grandchildPid), false, `孙进程成了孤儿 PID=${grandchildPid}`)
+console.log(`✅ 进程树回收带走父子两代（父=${parent.pid} 孙=${grandchildPid}）`)
+
+// 无效 PID / 已退出进程要幂等，不能抛
+assert.equal(killProcessTree(0).ok, false)
+assert.equal(killProcessTree('x').ok, false)
+const ghost = spawn(process.execPath, ['-e', 'void 0'], { windowsHide: true })
+await new Promise((r) => ghost.once('exit', r))
+const ghostResult = killProcessTree(ghost.pid)
+assert.equal(ghostResult.ok, true, `杀已退出的进程应幂等成功: ${ghostResult.detail}`)
+
+console.log('=== [12/12] detach 才真解耦：托管后端会随拉起它的那个进程退出而被 EPIPE 带走 ===')
+// 用一个会持续写 stdout 的桩"后端"复现真实形状（真后端 = node dist/index.js start + 心跳日志）。
+// 托管模式 stdio 是管道：拉起者一退，管道断裂，桩进程因 EPIPE 自杀；detach 模式必须活下来。
+const stubDir = mkdtempSync(join(tmpdir(), 'dwb-lifecycle-'))
+mkdirSync(join(stubDir, 'dist'), { recursive: true })
+writeFileSync(join(stubDir, 'dist', 'index.js'), [
+  'import { createServer } from "node:http"',
+  'const port = Number(process.env.PORT || 0)',
+  'createServer((req, res) => {',
+  '  res.writeHead(200, { "content-type": "application/json" })',
+  '  res.end(JSON.stringify({ ok: true, version: "0.0.0-stub", toolReasoning: "clean", toolCalls: "text", authReady: true, authAgeMs: 1 }))',
+  '}).listen(port, "127.0.0.1")',
+  'setInterval(() => console.log("heartbeat " + Date.now()), 120)',
+  '',
+].join('\n'), 'utf8')
+
+// ESM import 只认 file:// URL，Windows 盘符路径会直接 ERR_UNSUPPORTED_ESM_URL_SCHEME
+const serverModule = pathToFileURL(fileURLToPath(new URL('../lib/server.js', import.meta.url))).href
+const wrapperPath = join(stubDir, 'wrapper.mjs')
+writeFileSync(wrapperPath, [
+  'import { createBackendManager } from ' + JSON.stringify(serverModule),
+  'const detach = process.argv[2] === "detach"',
+  'const manager = createBackendManager({',
+  '  baseUrl: "http://127.0.0.1:" + process.env.STUB_PORT,',
+  '  serverDir: process.env.STUB_DIR,',
+  '  autoStart: true, startTimeoutMs: 20000, healthTtlMs: 0, detach,',
+  '}, null)',
+  'const health = await manager.ensure()',
+  'console.log("PID=" + manager.pid() + " HEALTH=" + (health && health.version))',
+  'process.exit(0)',
+  '',
+].join('\n'), 'utf8')
+
+async function freePort() {
+  const srv = createServer()
+  await new Promise((resolve) => srv.listen(0, '127.0.0.1', resolve))
+  const port = srv.address().port
+  await new Promise((resolve) => srv.close(resolve))
+  return port
+}
+
+async function healthy(port) {
+  try {
+    const res = await fetch(`http://127.0.0.1:${port}/health`, { signal: AbortSignal.timeout(1500) })
+    return res.ok
+  } catch {
+    return false
+  }
+}
+
+function runWrapper(port, mode) {
+  return new Promise((resolve, reject) => {
+    const proc = spawn(process.execPath, [wrapperPath, mode], {
+      env: { ...process.env, STUB_PORT: String(port), STUB_DIR: stubDir },
+      stdio: ['ignore', 'pipe', 'pipe'],
+      windowsHide: true,
+    })
+    let out = ''
+    let err = ''
+    proc.stdout.on('data', (b) => { out += String(b) })
+    proc.stderr.on('data', (b) => { err += String(b) })
+    proc.once('exit', (code) => (code === 0 ? resolve(out) : reject(new Error(`wrapper exit=${code} ${err}`))))
+  })
+}
+
+// 任何一段断言失败都不能把桩进程留在机器上
+const spawnedStubs = []
+try {
+  // A) detach：拉起者退出后桩后端必须还活着
+  const portDetach = await freePort()
+  const detachOut = await runWrapper(portDetach, 'detach')
+  const detachPid = Number((detachOut.match(/PID=(\d+)/) || [])[1])
+  spawnedStubs.push(detachPid)
+  assert.ok(detachPid > 0, `没拿到 detach 后端的 PID: ${detachOut}`)
+  assert.match(detachOut, /HEALTH=0\.0\.0-stub/)
+  await new Promise((r) => setTimeout(r, 1200))
+  assert.equal(await healthy(portDetach), true, 'detach 模式下后端随拉起者一起没了')
+  killProcessTree(detachPid, { force: true })
+  console.log('✅ detach：拉起者退出，后端 PID 仍存活并被显式回收')
+
+  // B) 托管：拉起者退出后管道断裂，后端应当被 EPIPE 带走（这就是宿主退出=服务停的耦合语义）
+  const portSupervised = await freePort()
+  const supervisedOut = await runWrapper(portSupervised, 'supervised')
+  const supervisedPid = Number((supervisedOut.match(/PID=(\d+)/) || [])[1])
+  spawnedStubs.push(supervisedPid)
+  assert.ok(supervisedPid > 0, `没拿到托管后端的 PID: ${supervisedOut}`)
+  // 拉起者退出前它确实健康过（wrapper 里 ensure() 成功并回打了 version）；
+  // 退出后立刻健康检查是没意义的——管道一断它就死，那正是本例要证明的耦合。
+  assert.match(supervisedOut, /HEALTH=0\.0\.0-stub/)
+  let died = false
+  const stopAt = Date.now() + 8000
+  while (Date.now() < stopAt) {
+    if (!isAlive(supervisedPid) && !(await healthy(portSupervised))) { died = true; break }
+    await new Promise((r) => setTimeout(r, 200))
+  }
+  assert.ok(died, '托管模式下后端没被 EPIPE 牵连——说明 stdio 选择逻辑变了，请同步 README 的耦合说明')
+  console.log('✅ 托管：拉起者一退，后端随之退出（耦合语义与设计一致）')
+} finally {
+  for (const pid of spawnedStubs) {
+    if (isAlive(pid)) killProcessTree(pid, { force: true })
+  }
+  try {
+    rmSync(stubDir, { recursive: true, force: true })
+  } catch {
+    // 清不掉只是留下临时目录，不该让测试失败
+  }
 }
 
 // 触发 dispose

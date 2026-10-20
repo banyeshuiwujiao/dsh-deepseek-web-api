@@ -32,3 +32,7 @@
         streamIdleTimeoutMs: 120000
         # 填路径则把后端子进程输出落盘（超过 2MB 轮转 .1），便于事后取证；留空只留在内存尾部 20 行。
         logFile: ''
+        # 托管（默认）：stdio 走管道，插件可 tail 日志并在 dispose 时按进程树回收（含后端起的 Chrome）；
+        # 副作用是拉起者被强杀时后端会因 EPIPE 自行退出。detach: true 则相反——后端独立存活。
+        detach: false
+        killTreeOnDispose: true

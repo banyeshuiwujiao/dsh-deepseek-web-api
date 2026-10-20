@@ -140,11 +140,14 @@
 
 ## P2 —— 进程生命周期、安全与可移植性
 
-- [ ] **P2-1 `dispose()` 只杀直接子进程,headless Chrome 变孤儿**
-  证据:当前 Chrome PID 13136(监听 CDP 9333)的 `ParentProcessId=19508`,而 19508 是**早已被杀掉的旧后端**;
-  它至今存活,新后端靠 `data/chrome.cdp` 复用它。`server.js:141` 的 `child.kill()` 在 Windows 上不成树。
-  改法:Windows 用 `taskkill /PID <pid> /T /F`(或显式结束 CDP 拉起的 Chrome),加配置开关
-  `killTreeOnDispose`(默认真),并在文档里写清"复用已有 Chrome 是有意为之"。
+- [x] **P2-1 `dispose()` 只杀直接子进程,headless Chrome 变孤儿** —— 已修,见「P2 落地记录」
+  原证据:Chrome PID 13136(监听 CDP 9333)的 `ParentProcessId=19508`,而 19508 是**早已被杀掉的旧后端**;
+  它至今存活,新后端靠 `data/chrome.cdp` 复用它。`child.kill()` 在 Windows 上不成树。
+
+- [x] **P2-8(新发现)托管 stdio 让后端被拉起者的退出以 EPIPE 方式牵连杀死** —— 已修(改成显式 `detach`),见「P2 落地记录」
+  原证据:`live_e2e.mjs` 跑完退出后,8787 直接 connection refused——后端不是因为"宿主 dispose"优雅收的,
+  而是因为父进程没了、stdout 管道断裂、写日志时 EPIPE 未捕获而自杀。行为"碰巧对",但既不可控也难诊断,
+  一次性脚本会被误伤。
 
 - [ ] **P2-2 spawn 继承整个 `process.env`**
   证据:`server.js:69` `...process.env`。DSH 进程里任何 `DS_*`/`PORT` 都会渗进后端;
@@ -215,13 +218,46 @@
 
 ---
 
+## 附:P2 落地记录(进程生命周期批次)
+
+新增 `lib/process.js`（把"怎么起、怎么收"从 server.js 里拆出来，便于单测），`lib/server.js` 负责按配置选用。
+
+1. **进程树回收**：`killProcessTree(pid)` 在 Windows 走 `taskkill /PID <pid> /T /F`，POSIX 先打进程组
+   `-pid`，拿不到进程组时退化成单进程信号（不比旧行为差）；`isAlive()` 用 `signal 0` 探测，`EPERM` 算活着。
+   `dispose()` 默认 `killTreeOnDispose: true` → 后端起的 headless Chrome 一起收，不再留占 CDP 端口的孤儿。
+   幂等：目标已自行退出时按成功处理（`taskkill` 的"没有这样的进程"不报错）。
+   测试 `[11/12]` 用真进程复现"父起孙"的形状（后端 → Chrome 就是这个形状），断言两代都消失；
+   并断言无效 PID/已退出 PID 不抛。
+2. **两种显式语义，取代"靠 EPIPE 碰巧对"**：
+   - 托管（默认）：`stdio: ['ignore','pipe','pipe']`，插件能 tail 与落盘；拉起者被强杀 → 管道断裂 → 后端 EPIPE 退出。
+     这条耦合现在是**被测试锁住的行为**，而不是意外事故。
+   - `detach: true`：`detached` 新进程组 + `stdio` 落 `logFile`（没配就 ignore）+ `unref()`，
+     `child` 置空，`dispose()` 明确不碰它（只打一行 info 说明保留 PID）。
+   测试 `[12/12]` 用桩"后端"（监听 `PORT` + 每 120ms 写心跳）分别验证：detach 下包装进程退出后
+   `GET /health` 仍通；托管下它必然死掉。断言失败信息里写明"说明 stdio 选择逻辑变了，请同步 README"。
+   顺带修掉一个真 bug：detach 下 `child` 故意为 null，`ensure()` 的就绪轮询原来按 `child === null`
+   判"进程已退出"，会把主动解耦误报成启动失败——现在按 PID 存活判断。
+3. **可诊断性**：`manager.pid()` 暴露 PID；拉起时 `logger.info` 打 `PID=… 模式=托管|detach`；
+   回收时打 `method=taskkill ok=true/false`；日志目录不存在会先建（`writeLogFile` 与 detach fd 都补了 `mkdirSync`）。
+4. **有意不做**（避免误伤，留作后续）：
+   - **不自动回收陈旧 PID 文件里的进程**。理由是 Windows 上 PID 会被复用，且当前 8787 上很可能就是
+     用户手工起的 `node dist/index.js start`——按一个残留 PID 去 `taskkill /T` 有可能杀掉无关进程。
+     要做也得先校验命令行与端口再动，收益不抵风险。
+   - **不杀"不是自己起的" Chrome**。复用已有 Chrome 是后端的既有设计（保住登录态与 CDP 会话），
+     插件只负责自己那条进程树。
+
+**P2 剩下的**：P2-2（`spawn` 继承整个 `process.env`，改白名单）、P2-3（API Key 每次同步读盘、缺失静默）、
+P2-4（绝对路径硬编码三处）、P2-5（嵌套 `.git`，需你决策）、P2-6（改配置要重启）。
+
+
+
 ## 附:P1 落地记录(本轮第二批,含真机复验)
 
 1. **P1-1 工具调用按 `index` 累积**:改为 `Map<index,{id,name,args}>` 收分片,流收尾时统一
    `block-start → tool-call-delta → block-end` 整块下发;缺 id 用 `call_dsh_<ts>_<seq>` 自增兜底。
-   smoke `[8/9]` 两个用例:同 index 分两片合成一个完整 `{"command":"ls"}`;一个 chunk 两个调用各自成块且 id 不撞。
+   smoke `[8/12]` 两个用例:同 index 分两片合成一个完整 `{"command":"ls"}`;一个 chunk 两个调用各自成块且 id 不撞。
 2. **P1-4 探活缓存 + 空闲超时**:`/health` 结果按 `healthTtlMs`(默认 30s)缓存,`ensure()` 命中缓存不再发请求
-   (smoke `[9/9]` 断言三次 ensure 只打一次 `/health`);读流用 `Promise.race` 包一层 `streamIdleTimeoutMs`
+   (smoke `[9/12]` 断言三次 ensure 只打一次 `/health`);读流用 `Promise.race` 包一层 `streamIdleTimeoutMs`
    (默认 120s),超时抛 `failureCode:'TIMEOUT'` → 归一为可重试的 `TIMEOUT`,不再永久挂着(smoke 实测 300ms 触发)。
 3. **P1-6 后端可辨识**:`/health` 现在回 `version/toolReasoning/toolCalls/authReady/authAgeMs`
    (反代侧新增 `src/server/health.ts`,每次现读);插件 `diffHealth()` 比对自身配置,
@@ -269,7 +305,7 @@
      (内核 `addUsage` 会把多个 usage 块相加,重复发=重复计费)。
    - 输出口径:有真实值就用真实值;输入口径上游永远不报,所以**始终按真正上线的载荷估算**
      (`system + 历史 + 工具 schema` 的 JSON),估算函数改为 CJK 1 字符 1 token、其余 4 字符 1 token(旧的一律 /3)。
-   - 验证:smoke `[5/7]` 断言"真实 usage 存在 → 恰好 1 个 usage 块且等于 `{12,25}`"、
+   - 验证:smoke `[5/12]` 与 `[6/12]` 断言"真实 usage 存在 → 恰好 1 个 usage 块且等于 `{12,25}`"、
      "无 usage → 输入估算 > 10(证明 system/tools 已计入)且输出等于 `estimateTokens(正文)`"。
 2. **P0-2 工具描述**:默认完整透传;新增 `toolDescriptionMaxChars`(默认 0=不裁剪,>0 才裁并加省略号)。
    smoke 断言上线请求体里 `tools[0].function.description` 等于原始多行文本。
