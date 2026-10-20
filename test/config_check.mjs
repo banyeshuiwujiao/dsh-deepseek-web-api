@@ -25,6 +25,7 @@ export const REQUIRED_KEYS = Object.freeze([
   'toolDescriptionMaxChars',
   'toolReasoning',
   'tools',
+  'streamContent',
   'healthTtlMs',
   'streamIdleTimeoutMs',
   'logFile',
@@ -51,6 +52,7 @@ const MACHINE_PATH = new RegExp(String.raw`(?:[A-Za-z]:[\\/][^\s'"]*(?:Users|hom
 const ENUMS = Object.freeze({
   toolReasoning: ['clean', 'hidden'],
   tools: ['text', 'native'],
+  streamContent: ['buffered', 'live'],
 })
 
 const indentOf = (line) => line.length - line.trimStart().length

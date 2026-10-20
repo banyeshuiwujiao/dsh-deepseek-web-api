@@ -31,6 +31,9 @@
         # 拉起后端时注入的环境开关；clean 让深度思考实时流式，tools 选择提示词里的工具协议形态。
         toolReasoning: 'clean'
         tools: 'text'
+        # 工具回合正文：buffered（默认）等解析完一次下发，最保真；live 让正文实时出字（只扣不回，
+        # 但被判无效的那一轮会重试，重来的答案只追加不上屏，屏幕文字可能与入库消息不同）。
+        streamContent: 'buffered'
         # /health 结果缓存：一次 13 步的会话不必每步都探活一次。0 = 每次都探活。
         healthTtlMs: 30000
         # 上游连续无数据的容忍上限，超时按可重试的 TIMEOUT 中止。0 = 不设上限。

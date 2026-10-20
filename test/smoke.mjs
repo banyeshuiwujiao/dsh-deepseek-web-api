@@ -29,7 +29,7 @@ import { expandHome, readGitRev, readPointer, resolveLogFile, resolveServerDir, 
 import { checkContract, compareVersions } from '../lib/contract.js'
 
 /** 满足能力契约的探活响应：新校验下，mock 后端必须自述能力才不会被判旧构建。 */
-const HEALTH_OK = { ok: true, version: '0.2.0', toolReasoning: 'clean', toolCalls: 'text', authReady: true, authAgeMs: 1, capabilities: ['dsml-tool-calls', 'protocol-switches', 'include-usage', 'health-self-description'] }
+const HEALTH_OK = { ok: true, version: '0.2.0', toolReasoning: 'clean', toolCalls: 'text', streamContent: 'buffered', authReady: true, authAgeMs: 1, capabilities: ['dsml-tool-calls', 'protocol-switches', 'include-usage', 'health-self-description', 'live-tool-content'] }
 
 const loggerProbe = { info() {}, warn: (m) => probeWarnings.push(m), debug() {} }
 const probeWarnings = []
@@ -542,12 +542,22 @@ console.log('=== [9/18] 探活缓存与复用实例的配置比对 ===')
 assert.equal(diffHealth(null, { toolReasoning: 'clean' }).stale, true)
 assert.deepEqual(diffHealth({ version: '0.1.0' }, {}).mismatches, [])
 const mismatch = diffHealth(
-  { version: '0.1.0', toolReasoning: 'hidden', toolCalls: 'native', authReady: false },
-  { toolReasoning: 'clean', tools: 'text' },
+  { version: '0.1.0', toolReasoning: 'hidden', toolCalls: 'native', streamContent: 'buffered', authReady: false },
+  { toolReasoning: 'clean', tools: 'text', streamContent: 'live' },
 )
 assert.ok(mismatch.mismatches.some((m) => m.includes('DS_TOOL_REASONING')))
 assert.ok(mismatch.mismatches.some((m) => m.includes('DS_TOOLS')))
+assert.ok(mismatch.mismatches.some((m) => m.includes('DS_STREAM_CONTENT')))
 assert.ok(mismatch.mismatches.some((m) => m.includes('authReady')))
+// 旧后端不自述 streamContent：不能因为它没有这个字段就误报不一致
+assert.deepEqual(
+  diffHealth({ ...HEALTH_OK, streamContent: undefined }, { streamContent: 'live' }).mismatches,
+  [],
+)
+assert.ok(
+  diffHealth({ ...HEALTH_OK, streamContent: 'live' }, { streamContent: 'live' }).mismatches.length === 0,
+  '配置与后端自述一致时不该有任何告警',
+)
 
 {
   let healthHits = 0
@@ -760,7 +770,9 @@ const hostEnv = {
   PORT: '9999',
   HOST: '0.0.0.0',
 }
-const built = buildChildEnv(hostEnv, { inject: { PORT: '8787', DS_TOOLS: 'text', DS_TOOL_REASONING: 'clean' } })
+const built = buildChildEnv(hostEnv, {
+  inject: { PORT: '8787', DS_TOOLS: 'text', DS_TOOL_REASONING: 'clean', DS_STREAM_CONTENT: 'live' },
+})
 assert.equal(built.env.PATH, hostEnv.PATH)
 assert.equal(built.env.SYSTEMROOT, hostEnv.SYSTEMROOT)
 assert.equal(built.env.DS_DEBUG, '1', 'DS_ 命名空间应当透传')
@@ -768,6 +780,7 @@ assert.equal(built.env.DS_DATA_DIR, 'D:\\ds-data')
 assert.equal(built.env.DS_TOOL_REASONING, 'clean', '插件显式设定必须盖过宿主同名值')
 assert.equal(built.env.PORT, '8787', '宿主的 PORT 会静默改掉后端监听端口，必须被覆盖')
 assert.equal(built.env.DS_TOOLS, 'text')
+assert.equal(built.env.DS_STREAM_CONTENT, 'live', '正文流式模式由插件配置决定，不能靠宿主的残留环境变量')
 for (const leak of ['npm_config_registry', 'VIRTUAL_ENV', 'PYTHONPATH', 'CAMOFOX_PORT', 'DEEPSEEK_API_KEY', 'OTHER_DS_LIKE', 'EMPTY']) {
   assert.ok(!(leak in built.env), `${leak} 不该进子进程`)
 }
