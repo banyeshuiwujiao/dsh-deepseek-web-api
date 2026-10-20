@@ -34,7 +34,16 @@
    - `killTreeOnDispose: false` 可退回只杀直接子进程的旧行为。
 15. **子进程环境变量白名单**：拉起后端不再全量继承 `process.env`，只放行「跑起 Node/Chrome 必需的 OS 变量」+ 后端自己声明的 `DS_` 命名空间 + 本插件显式设定。宿主里的 `npm_config_*`、`VIRTUAL_ENV`、`PYTHONPATH`、别的插件的 `CAMOFOX_PORT`、`DEEPSEEK_API_KEY` 都进不去；宿主的 `PORT`/`HOST` 也不会静默改掉后端的监听端口与绑定网卡（要放行用 `passEnvKeys` 点名，或直接写 `env`）。
 16. **API Key 解析可诊断**：优先级为 配置 `apiKey` → 环境变量 `DS_API_KEY` → `<serverDir>/data/.api-key`；文件按 mtime 缓存（不再每步同步读盘），缺失时给一次可操作告警并提示 `pnpm login`，且任何日志都不回显密钥内容。
-17. **不污染工具列表**：遵循 DSH 设计哲学，不导出任何 Action 工具。
+17. **后端目录可移植**：配置文件里不再出现某台机器的绝对路径。解析顺序为
+   配置 `serverDir` → 环境变量 `DSH_DEEPSEEK_WEB_API_DIR` → 指针文件 `~/.dsh/deepseek-web-api.json`（`install.ps1` 写，含后端 git 版本）→ 插件同级（源码形态）→ home 下常见位置。
+   显式写了但那个目录没有 `dist/index.js` 时**不一票否决**，继续往下找并把这件事记进日志——换机器忘记改配置是常态。
+   `logFile` 等路径支持 `~` 前缀。
+18. **后端能力契约**：`GET /health` 必须自述 `dsml-tool-calls`、`protocol-switches`、`include-usage`、
+   `health-self-description` 四项能力，缺任何一项就**拒绝复用**并报不可重试的 `BACKEND_STALE`（错误信息直接给出"在哪跑 `pnpm build`"）。
+   为什么不比版本号：真机上亲眼见到一个**旧 dist 自述 `version: 0.2.0`**——因为版本号是每次 `/health` 现读 `package.json` 的，
+   旧代码也会报新版本号，比数字会被放行；能力清单才是可判定的事实。
+   想强行复用旧后端就把 `strictBackend` 设为 `false`（降级为告警），或用 `requiredCapabilities` / `minBackendVersion` 精确声明依赖。
+19. **不污染工具列表**：遵循 DSH 设计哲学，不导出任何 Action 工具。
 
 ---
 
@@ -60,7 +69,8 @@ cd C:\Users\Admin\DeepSeek_Harness\dsh-client-config\plugins\dsh-deepseek-web-ap
       name: dsh-deepseek-web-api/provider
       config:
         baseUrl: 'http://127.0.0.1:8787'
-        serverDir: 'C:\Users\Admin\DeepSeek_Harness\git-repo\deepseek-web-api'
+        # 后端目录不用写：按 配置 serverDir → DSH_DEEPSEEK_WEB_API_DIR → 指针文件 → 同级 → home 候选 解析。
+        # 需要指明时可以写 ~ 前缀：serverDir: '~/DeepSeek_Harness/git-repo/deepseek-web-api'
         autoStart: true
         startTimeoutMs: 60000
         maxContextWindow: 128000
@@ -73,6 +83,10 @@ cd C:\Users\Admin\DeepSeek_Harness\dsh-client-config\plugins\dsh-deepseek-web-ap
         logFile: ''              # 填路径则后端输出落盘（>2MB 轮转 .1）
         detach: false            # true = 后端独立存活，插件退出不牵连它
         killTreeOnDispose: true  # 托管模式 dispose 连带回收 Chrome 等孙进程
+        passEnvKeys: []          # 白名单之外还要透传的变量名
+        strictBackend: true      # 后端能力不足时拒绝复用（BACKEND_STALE）
+        requiredCapabilities: [] # 留空 = 用插件内置清单
+        minBackendVersion: ''    # 留空 = 用插件内置下限
 ```
 
 > `defaultMaxTokens` 不会真的限制输出：网页端上游不接受 token 上限（反代 `docs/api.md` 已说明），

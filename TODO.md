@@ -152,7 +152,7 @@
 - [x] **P2-2 spawn 继承整个 `process.env`** —— 已修(白名单),见「P2 落地记录」第 5 条
 - [x] **P2-3 API Key 每请求同步读盘,缺失时静默** —— 已修(mtime 缓存 + 一次性可操作告警),见「P2 落地记录」第 6 条
 
-- [ ] **P2-4 到处硬编码 `C:\Users\Admin\...`,换机器即废**
+- [x] **P2-4 到处硬编码 `C:\Users\Admin\...`,换机器即废** —— 已改为解析层 + 指针文件,见「契约落地记录」
   证据:`provider.js:40` DEFAULTS.serverDir、`cordis.patch.yml:18`、`install.ps1` 里的 `$backendDir` 全是绝对路径。
   改法:支持环境变量(如 `DSH_DEEPSEEK_WEB_API_DIR`)/相对仓库根解析 + 常见位置探测,失败时给可操作报错;
   文档里把"必须改这三处"写清楚。
@@ -196,7 +196,7 @@
   `[11/15]` 依赖 `taskkill /T`、`[12/15]` 验证托管/detach 的父子进程语义，Linux 上跑"绿"是自欺。
   `preparecall_regression` / `live_e2e` 保留本地，CI 只检查这两个文件没被误删，并在 README 写明分工。
 
-- [ ] **P3-3 插件与后端的版本契约没有锁**
+- [x] **P3-3 插件与后端的版本契约没有锁** —— 已锁成能力契约,见「契约落地记录」
   证据:插件 0.1.0 的正确性依赖反代未发布的那批提交(`25c39de`…`e117a84`:DSML 解析、`DS_TOOLS`、截断重试、推理流式)。
   跑一个旧 `dist` 会**静默退回到最初那个 bug**(协议文本当正文、回合判为 completed)。
   现状:P1-6 之后 `/health` 会自述 version 与开关，旧构建(不自述)已被 `diffHealth` 判为 stale 并告警——**能发现，但不会拦**;
@@ -218,6 +218,57 @@
   `camofox POST /tabs HTTP 500 (browserType.launch ENOENT)` 与 `HTTP 400 Blocked URL scheme: file:`。
 
 ---
+
+## 附:契约与可移植性落地记录(P2-4 + P3-3)
+
+### P2-4 路径解析层（`lib/paths.js`）
+
+原先绝对路径出现在**四处**（比原估的三处多一处 `test/live_e2e.mjs`）：`DEFAULTS.serverDir`、
+插件样板 yml、`install.ps1`、真机脚本。现在统一走 `resolveServerDir`：
+
+配置 `serverDir` → 环境变量 `DSH_DEEPSEEK_WEB_API_DIR` → 指针文件 `~/.dsh/deepseek-web-api.json`
+→ 插件同级（源码形态 `../../../git-repo/deepseek-web-api`）→ home 下六个常见位置。
+
+三个刻意的设计：
+- **过期配置不一票否决**：写了 `serverDir` 但那个目录没有 `dist/index.js` 时，记录进 `notes` 并继续往下找。
+  换机器忘记改配置是常态，让它直接失败等于把可移植性锁回"必须手改这一处"。
+- **指针文件由 `install.ps1` 固化**（含 `gitRev` 与 `updatedAt`）：首次靠 env/同级/发现定位成功后立刻写回，
+  之后不再依赖猜测顺序，而且能回答"这个位置是谁、什么时候、按什么来源定的"。
+  实测写入：`{"serverDir":"...git-repo\\deepseek-web-api","gitRev":"7b1eacf","updatedAt":"2026-10-20T13:30:10Z"}`，
+  install 输出 `后端目录 = …（来源 discover）` → `指针已写入: ~/.dsh/deepseek-web-api.json`。
+- **`~` 前缀**：`logFile: '~/.dsh/logs/deepseek-web-api.log'` 在插件与样板 yml、desktop profile 里都改用 `~`，
+  desktop profile 里那条 `C:\Users\Admin\...` 已消失。
+- 全都没有时抛的错**交代找过哪些位置**并给出下一步（`pnpm build` / 环境变量 / `-BackendDir`）。
+- `install.ps1` 新增 `-BackendDir` 参数：显式指定时先校验再写指针；不传就走解析。
+
+### P3-3 能力契约（`lib/contract.js` + 反代 `capabilities`）
+
+**为什么最终选了能力清单而不是版本号**——真机抓到一个决定性反例：把契约写完之后去探正在跑的 8787，
+它自述 `{"version":"0.2.0", 没有 capabilities}`。那个进程是**加 capabilities 之前**构建的旧 dist，
+但 `version` 是每次 `/health` **现读 `package.json`** 的，所以旧代码也报了新版本号。
+按版本号判断会直接放行——这正是"看起来正常但能力静默失效"的形态。
+
+- 反代侧：`/health` 增加 `capabilities`（`dsml-tool-calls`、`protocol-switches`、`truncated-retry`、
+  `live-reasoning`、`include-usage`、`health-self-description`），版本升到 `0.2.0`，
+  CHANGELOG 把 Unreleased 落成正式条目（反代提交 `7b1eacf`）。
+- 插件侧：`checkContract()` 默认要求四项能力，`strictBackend`（默认 true）不满足就
+  `throw` 带 `failureCode:'BACKEND_STALE'`，映射成**不可重试**的 finish 错误（重试只会在同一个旧后端上再撞一次），
+  报错文本直接写"在哪跑 `pnpm build`"和降级办法；`strictBackend:false` 降级为逐条告警。
+  `requiredCapabilities` / `minBackendVersion` 可覆盖内置清单；版本比较只在能力清单本身可信时参与。
+- 测试：smoke `[17/17]` 除了纯函数断言，还**真起一个 mock `/health`** 验证三条路径——
+  旧后端被拒（`BACKEND_STALE`）、`strictBackend:false` 放行、合规后端通过。
+- 真机闭环：旧进程拒绝复用 → 树回收 → 新 dist 起来自述 `capabilities=6`、`mismatches=0`，
+  随后一轮真实工具回合 `usage 0/672`、`pwsh` 参数完整、`finish=tool-calls`、日志 13 行。
+
+### 顺带补的守卫（CI 里跑）
+
+`test/config_check.mjs` 增加 `checkSampleHygiene()`：样板里出现**本机绝对路径**
+（`C:\Users\...`、`/home/me/...`）或把 `serverDir`/`apiKey`/`nodePath` 写成生效配置，直接判红；
+注释里的示例放行。smoke `[15/17]` 用七个正反用例钉住它，其中包括"把注释里的 `serverDir` 变成生效配置必须被抓"。
+`REQUIRED_KEYS` 相应去掉 `serverDir`、补上 `strictBackend`/`requiredCapabilities`/`minBackendVersion`。
+
+**剩下的**：P2-6（配置改了要重启）、P3-5（文档三件事）、以及你决定保留的 P1-2/P1-3。
+
 
 ## 附:P3 落地记录(CI 与安装校验批次)
 
