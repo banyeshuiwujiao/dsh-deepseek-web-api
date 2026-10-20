@@ -11,6 +11,8 @@ const opts = {
   startTimeoutMs: 90000,
   toolReasoning: "clean",
   tools: "text",
+  // 正文也走闸门实时下发：这条脚本就是为了看"正文是否真的逐步出现"，所以显式开 live。
+  streamContent: "live",
   defaultMaxTokens: 32768,
   healthTtlMs: 0,
   logFile,
@@ -58,6 +60,12 @@ for await (const chunk of adapter.stream("deepseek-web-thinking", {
   chunks.push(chunk)
   if (chunk.type === "reasoning-delta" && chunks.filter((c) => c.type === "reasoning-delta").length === 1) {
     console.log(`  首个推理增量 +${Date.now() - t0}ms`)
+  }
+  if (chunk.type === "text-delta") {
+    const seen = chunks.filter((c) => c.type === "text-delta").length
+    if (seen === 1) console.log(`  首个正文增量 +${Date.now() - t0}ms`)
+    // 逐条打时间戳：只有一条 = 仍在缓冲；多条且时间铺开 = live 生效。
+    console.log(`    正文#${seen} +${Date.now() - t0}ms ${JSON.stringify(String(chunk.text ?? "").slice(0, 24))}`)
   }
 }
 
