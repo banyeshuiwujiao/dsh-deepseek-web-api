@@ -165,7 +165,7 @@
   留下的规矩：以后本插件目录整体只在本仓提交；外层仓只提交 `profiles/**`；新独立的插件仓都要在同一段 .gitignore 里登记，
   别再出现"半跟踪"状态。任何后续 agent 看到外层 `?? plugins/dsh-deepseek-web-api/...` 属正常，不是待办。
 
-- [ ] **P2-6 配置快照一次性,改了要重启客户端**
+- [x] **P2-6 配置快照一次性,改了要重启客户端** —— 已改为按调用活读 + 分代绑定,见文末「P2-6 落地记录」
   证据:`apply(ctx, config)`(`provider.js:445-450`)在加载时合并一次 config;
   `registerConfigurableProviders` 声明了 `settingsPath:['providers','deepseek-web-api']`,但没有订阅变更。
   改法:监听配置变更 → 重建 manager/adapter(注意别把正在跑的请求打断),或至少在文档里写明"改配置需重启"。
@@ -211,7 +211,7 @@
   漏复制/半复制（例如新加 `lib/process.js` 没同步）当场 throw。
   实测输出:`构建就绪且不落后于源码` + `后端 git 版本: 696f361` + `已同步并校验一致`。
 
-- [ ] **P3-5 文档要补的三件事**
+- [x] **P3-5 文档要补的三件事** —— 已写 `docs/protocols.md` 与 `docs/troubleshooting.md`，见文末「P3-5 落地记录」
   ① 双协议设计(反代文档化文本协议 vs 网页原生 DSML)与"为什么正文在工具回合要缓冲";
   ② `PROTOCOL_LEAK` 兜底的触发条件与用户可见表现;
   ③ 本次真机会话里两个**不是本插件问题**的失败要写进 troubleshooting,避免误判归因:
@@ -467,3 +467,51 @@ P3-5（文档三件事）。
 - [x] 插件侧泄漏兜底 `PROTOCOL_LEAK` 进 `retryableCodes`,并注入 `DS_TOOL_REASONING`/`DS_TOOLS`。
 - [x] `profiles/desktop/cordis.patch.yml` 增补 `toolReasoning: 'clean'` / `tools: 'text'` 并已 `sync-profiles.py` 同步。
 - [x] smoke `[5/5]` 两例 + 真实 DSH `prepareCall` 回归通过;运行时镜像与源一致。
+
+## 附:P2-6 落地记录(配置改动免重启)
+
+先确认内核到底给什么，再决定怎么写——`LlmAdapter` 基类对 `prepareCall` 的原话是:
+"Bind exact model metadata and the eventual request dispatch to one adapter generation.
+Dynamic adapters override this so settings changes between preparation and dispatch
+cannot combine one generation's ... with another's." 即**每轮请求都会走 `prepareCall`**,
+并且明确要求"代际"不能混用。据此:
+
+1. 适配器构造不再固化配置: 收 `source`(对象或返回配置的函数),`_read()` 每次现合并 `DEFAULTS`。
+   `apply()` 传的是闭包 `() => config`,宿主原地更新配置对象时下一轮自然取到新值。
+2. `current()` 是唯一的取用点,并区分两类键:
+   - 只影响请求的(`toolDescriptionMaxChars`/`defaultMaxTokens`/`maxContextWindow`/`strictBackend` 之外那批)→ 直接生效;
+   - 影响后端进程的(`MANAGER_KEYS`: baseUrl/serverDir/pointerFile/nodePath/autoStart/startTimeoutMs/
+     healthTtlMs/toolReasoning/tools/logFile/detach/killTreeOnDispose/passEnvKeys/env/requiredCapabilities/minBackendVersion)
+     → 指纹变化才 `dispose()` 旧管理器并重建,纯请求侧改动不付"杀进程重启"的代价。
+3. `prepareCall` 里读当代 opts、取当代 manager,并把两者一起绑进本轮 `stream(model, options, opts, manager)`;
+   `stream` 不再读 `this.opts`/`this._manager`,所以"准备完之后配置被改"不会影响已在飞的这一轮。
+4. `apply()` 返回 adapter 句柄,`ctx.on('dispose')` 调 `adapter.dispose()` 回收**懒建**的管理器
+   (管理器改成懒建,不再在加载时就 spawn 探测);`ensureManager()` 负责"要用了才建"。
+5. 诚实边界: 若宿主既不原地更新配置对象、也不重新装配插件,任何插件都做不到免重启——
+   这一点写在 README 第 19 条的语义里("每轮请求取当代配置"),而不是空头承诺"热更新"。
+   验证口径是"同实例中途改配置对象"能立刻影响下一轮(smoke `[18/18]`)。
+
+smoke `[18/18]` 断言四件事: 改 `defaultMaxTokens` 后 `resolveModel` 立即反映新值且**没有**重建管理器;
+改 `baseUrl` 后旧管理器被 dispose、新管理器建出来;代际隔离(准备完之后把配置改成死地址,本轮仍走准备时那一代
+并成功完成);`apply()` 返回句柄且 `dispose()` 能清掉懒建管理器。跑起来能看到
+`配置里与后端进程相关的项已变更,重建后端管理器` 这条日志,证明重建路径真被走到。
+
+## 附:P3-5 落地记录(文档三件事)
+
+新增两份文档,README 底部有入口:
+
+- `docs/protocols.md` —— ① 双协议为什么并存(DSH 只发原生 function 形态、网页私有接口没有 function 通道,
+  只能把工具表写进 prompt;模型又会自顾自吐 DSML)、两种形态各由谁解析、
+  ② 工具回合正文为何缓冲(三条理由,含"脏文本进 UI 后重试会留双份内容"这条用户可见代价)、
+  ③ 不完整载荷为何判不可用(真机产生过 `write` 空调用)、④ 为何不信版本号(真机反例: 旧 dist 自述 0.2.0 无 capabilities)。
+- `docs/troubleshooting.md` —— 一分钟取清单(含 zstd 会话日志怎么解)、症状→看哪里→判定 的表、
+  ② `PROTOCOL_LEAK`/`BACKEND_STALE`/`EMPTY_RESPONSE`/`ABORTED`/`TIMEOUT`/`AUTH` 的用户可见表现与含义、
+  ③ 明确标出两类**不属于本插件**的真机失败(camofox `HTTP 500 ENOENT` 与 `HTTP 400 Blocked URL scheme: file:`)
+  并给出区分办法(本插件的错都带稳定错误码的 `finish`;工具自己的错走 `tool/result`),最后是换机器必查项。
+
+写作口径固定为"新机器上也能照着敲":每条都给具体文件路径或可执行命令,不写"检查配置是否正确"这类空话。
+
+**TODO 已清空的部分**: P0 全 8 条、P1-1/3/4/5/6/7/8、P2-1/2/3/4/5(有意设计)/6/7、P3-1/2/3/4/5。
+**仅剩两条,且是主动保留**: P1-2(工具回合正文仍全量缓冲)、P1-3(泄漏检测仍在流末尾)——
+都需要重新论证协议不变量,属设计变更。
+

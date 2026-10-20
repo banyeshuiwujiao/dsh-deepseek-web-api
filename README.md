@@ -43,7 +43,19 @@
    为什么不比版本号：真机上亲眼见到一个**旧 dist 自述 `version: 0.2.0`**——因为版本号是每次 `/health` 现读 `package.json` 的，
    旧代码也会报新版本号，比数字会被放行；能力清单才是可判定的事实。
    想强行复用旧后端就把 `strictBackend` 设为 `false`（降级为告警），或用 `requiredCapabilities` / `minBackendVersion` 精确声明依赖。
-19. **不污染工具列表**：遵循 DSH 设计哲学，不导出任何 Action 工具。
+19. **配置改动不必重启客户端**：适配器不再在加载时固化配置快照，而是每轮请求（`prepareCall`）取当代配置；
+    只影响请求的项（如 `toolDescriptionMaxChars`、`defaultMaxTokens`）改完下一轮即生效；
+    影响后端进程的项（`baseUrl`、`serverDir`、`toolReasoning`、`tools`、`logFile`、`detach` 等）变更时
+    自动回收旧后端管理器并重建（会打一条 info/warn）。每代请求把自己那一份配置与管理器绑死，
+    避免"准备时用新值、派发时又混进旧一代"。`apply()` 返回适配器句柄，卸载时回收懒建的管理器。
+20. **不污染工具列表**：遵循 DSH 设计哲学，不导出任何 Action 工具。
+
+---
+
+## 深入文档
+
+- [`docs/protocols.md`](./docs/protocols.md)：为什么同时存在两种工具协议、为什么工具回合的正文要缓冲后一次性下发、为什么不信任版本号。
+- [`docs/troubleshooting.md`](./docs/troubleshooting.md)：症状 → 看哪里 → 判定依据；含两类**不属于本插件**的浏览器工具报错怎么区分、换机器必查项。
 
 ---
 
