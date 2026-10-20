@@ -25,7 +25,7 @@ import {
 import { createBackendManager, diffHealth, resolveApiKey, resetApiKeyCache } from '../lib/server.js'
 import { ENV_BASE_ALLOWLIST, buildChildEnv, buildSpawnPlan, isAlive, killProcessTree } from '../lib/process.js'
 import { PROVIDER_ID as CONFIG_PROVIDER_ID, REQUIRED_KEYS, check as checkConfig, checkSampleHygiene } from './config_check.mjs'
-import { expandHome, readGitRev, readPointer, resolveLogFile, resolveServerDir, writePointer } from '../lib/paths.js'
+import { expandHome, readGitRev, readPointer, resolveLogFile, resolveServerDir, shouldRefreshPointer, writePointer } from '../lib/paths.js'
 import { checkContract, compareVersions } from '../lib/contract.js'
 
 /** 满足能力契约的探活响应：新校验下，mock 后端必须自述能力才不会被判旧构建。 */
@@ -964,8 +964,24 @@ console.log('=== [16/18] 后端目录与日志路径解析（可移植性）==='
   assert.equal(readGitRev(root), null)
   assert.equal(readGitRev(''), null)
 
+  // 8) 指针里的 gitRev 过期时要能被识别出来（install.ps1 命中指针分支后靠它回写）
+  //    真实事故：命中指针时脚本从不回写，指针停在 7b1eacf，而排查文档教人拿这个值判断
+  //    "是不是在跑旧构建"——过期基准会把新构建冤枉成旧构建。
+  assert.equal(shouldRefreshPointer('7b1eacf', '168c46e'), true, '过期指针没被识别出来')
+  assert.equal(shouldRefreshPointer('168c46e', '168c46e'), false, '一致时不该改写指针')
+  assert.equal(shouldRefreshPointer(null, '168c46e'), true, '指针没记版本时要补记')
+  assert.equal(shouldRefreshPointer('168c46e', null), false, '读不到实际版本就动指针等于把证据擦掉')
+  assert.equal(shouldRefreshPointer('', ''), false)
+  const stalePointerFile = join(root, 'stale-pointer.json')
+  writePointer(stalePointerFile, configured, '7b1eacf')
+  assert.equal(readPointer(stalePointerFile).gitRev, '7b1eacf')
+  writePointer(stalePointerFile, configured, '168c46e')
+  const refreshed = readPointer(stalePointerFile)
+  assert.equal(refreshed.gitRev, '168c46e', '回写后指针仍是旧版本')
+  assert.equal(refreshed.serverDir, configured, '回写把后端目录写坏了')
+
   rmSync(root, { recursive: true, force: true })
-  console.log('✅ 解析顺序：配置 → env → 指针 → 发现；过期配置只记录不否决')
+  console.log('✅ 解析顺序：配置 → env → 指针 → 发现；过期配置只记录不否决；过期指针能被识别')
 }
 
 console.log('=== [17/18] 后端能力契约：旧构建拒绝复用而不是静默退化 ===')

@@ -57,6 +57,24 @@ if ($info.source -ne 'pointer') {
     console.log(writePointer(DEFAULT_POINTER_FILE, process.argv[1], readGitRev(process.argv[1])))
   " $backendDir
   Write-Host "  指针已写入: $pinned"
+} else {
+  # 命中指针时过去什么都不写，指针里的 gitRev 就永远停在第一次落盘的那个版本；
+  # 而排查文档教人拿它和后端实际 HEAD 对比判断"是否在跑旧构建"——过期基准会反过来冤枉新构建。
+  # 这里只在版本对不上（或压根没记过）时回写一次，命中且一致则不动文件。
+  $synced = node --input-type=module -e "
+    import { readPointer, writePointer, readGitRev, shouldRefreshPointer, DEFAULT_POINTER_FILE } from 'file:///$pathsModule'
+    const dir = process.argv[1]
+    const pointer = readPointer(DEFAULT_POINTER_FILE)
+    const actual = readGitRev(dir)
+    if (!shouldRefreshPointer(pointer && pointer.gitRev, actual)) { console.log('OK'); process.exit(0) }
+    console.log('REFRESHED:' + writePointer(DEFAULT_POINTER_FILE, dir, actual) + ' ' + pointer.gitRev + ' -> ' + actual)
+  " $backendDir
+  if ($LASTEXITCODE -ne 0) { throw "指针校验失败: $synced" }
+  if ($synced -like 'REFRESHED:*') {
+    Write-Host "  指针 gitRev 已过期，回写: $($synced.Substring('REFRESHED:'.Length))"
+  } else {
+    Write-Host "  指针 gitRev 与后端实际版本一致，未改动"
+  }
 }
 if (-not (Test-Path $backendDist)) {
   Write-Host "  dist 不存在，正在构建 deepseek-web-api..."
