@@ -34,7 +34,7 @@ const HEALTH_OK = { ok: true, version: '0.2.0', toolReasoning: 'clean', toolCall
 const loggerProbe = { info() {}, warn: (m) => probeWarnings.push(m), debug() {} }
 const probeWarnings = []
 
-console.log('=== [1/17] 基础格式化：文本抽取与工具转换 ===')
+console.log('=== [1/18] 基础格式化：文本抽取与工具转换 ===')
 assert.equal(textOf('hello'), 'hello')
 assert.equal(textOf([{ type: 'text', text: 'part 1' }, { type: 'text', text: 'part 2' }]), 'part 1\npart 2')
 
@@ -102,7 +102,7 @@ assert.equal(formatOpenAiTools([]), undefined)
 assert.equal(clampDescription(multiLine, 8), '执行 PowerShell'.slice(0, 8) + '…')
 assert.equal(formatOpenAiTools([{ name: 'x', description: multiLine }], 6)[0].function.description, '执行 Pow…')
 
-console.log('=== [2/17] Token 估算与错误码归一 ===')
+console.log('=== [2/18] Token 估算与错误码归一 ===')
 // 中文不再被 /3 低报：CJK 按 1 字符 1 token
 assert.equal(estimateTokens('中文测试'), 4)
 assert.equal(estimateTokens('abcd'), 1)
@@ -130,7 +130,7 @@ assert.equal(resolveThinkingEnabled('deepseek-web-flash'), false)
 assert.equal(resolveThinkingEnabled('deepseek-reasoner'), true)
 assert.equal(resolveThinkingEnabled('my-flash-clone'), false)
 
-console.log('=== [3/17] Provider 契约与 Cordis apply 注册 ===')
+console.log('=== [3/18] Provider 契约与 Cordis apply 注册 ===')
 const fakeCtx = {
   llm: {
     registeredProviders: null,
@@ -179,7 +179,7 @@ for (const code of ['EMPTY_RESPONSE', 'RATE_LIMIT', 'SERVER', 'TIMEOUT', 'TRANSP
 // 内核读的是扁平 backoff 字段，不是嵌套对象
 assert.ok(Number.isFinite(policy.initialDelayMs) && Number.isFinite(policy.maxDelayMs))
 
-console.log('=== [4/17] 模型列表与 resolveModel / prepareCall ===')
+console.log('=== [4/18] 模型列表与 resolveModel / prepareCall ===')
 const models = await adapter.listModels(PROVIDER_ID)
 assert.ok(models.length >= 2, '模型列表数量不足')
 assert.ok(models.some((m) => m.id === 'deepseek-web-flash'))
@@ -199,7 +199,7 @@ assert.equal(typeof prepared.stream, 'function')
 // 已经中止的 signal 不该再发起请求
 await assert.rejects(() => adapter.prepareCall(PROVIDER_ID, 'deepseek-web-flash', { aborted: true }))
 
-console.log('=== [5/17] SSE 增量 → DSH StreamChunk（Mock Server）===')
+console.log('=== [5/18] SSE 增量 → DSH StreamChunk（Mock Server）===')
 
 /** 起一个 mock 反代：记录上线请求，按给定 SSE 行回放。 */
 async function withMockServer(lines, run, options = {}) {
@@ -319,7 +319,7 @@ assert.equal(estimatedUsage[0].usage.outputTokens, estimateTokens('中文回答'
 assert.equal(estimated.chunks.find((c) => c.type === 'finish').reason.kind, 'stop')
 assert.ok(!('max_tokens' in estimated.seen.body), '未指定时不该硬塞 max_tokens')
 
-console.log('=== [6/17] 兜底：协议残留 / 空回合 / 状态码 / 中止 ===')
+console.log('=== [6/18] 兜底：协议残留 / 空回合 / 状态码 / 中止 ===')
 const BAR = String.fromCharCode(0xff5c)
 const LEAK = `${BAR}${BAR}DSML${BAR}${BAR}`
 
@@ -416,7 +416,7 @@ for await (const chunk of preAborted.stream('deepseek-web-flash', { messages: []
 }
 assert.equal(preChunks[0].reason.kind, 'aborted')
 
-console.log('=== [7/17] 后端不可用时的错误口径 ===')
+console.log('=== [7/18] 后端不可用时的错误口径 ===')
 const offline = new DeepSeekWebApiAdapter({ baseUrl: 'http://127.0.0.1:1', autoStart: false })
 const offlineChunks = []
 for await (const chunk of offline.stream('deepseek-web-flash', { messages: [{ role: 'user', content: 'x' }] })) {
@@ -427,7 +427,7 @@ assert.equal(offlineFinish.reason.kind, 'error')
 assert.ok(['TRANSPORT', 'SERVER'].includes(offlineFinish.reason.failure.code))
 console.log('✅ 后端不可达:', offlineFinish.reason.failure.code)
 
-console.log('=== [8/17] 工具调用按 index 累积 / 流空闲超时 ===')
+console.log('=== [8/18] 工具调用按 index 累积 / 流空闲超时 ===')
 
 // 反代今天一个 chunk 给完整数组；若上游改成标准分片（同 index 多次追加），必须合成一个完整调用。
 const fragmented = await withMockServer(
@@ -489,7 +489,7 @@ assert.deepEqual(multiCalls.map((c) => c.argumentsDelta), ['{"p":1}', '{"p":2}']
   console.log('✅ 流空闲超时上报 TIMEOUT（可重试）')
 }
 
-console.log('=== [9/17] 探活缓存与复用实例的配置比对 ===')
+console.log('=== [9/18] 探活缓存与复用实例的配置比对 ===')
 // /health 自述信息与插件配置比对：不一致必须报出来，旧构建要判为 stale
 assert.equal(diffHealth(null, { toolReasoning: 'clean' }).stale, true)
 assert.deepEqual(diffHealth({ version: '0.1.0' }, {}).mismatches, [])
@@ -524,7 +524,7 @@ assert.ok(mismatch.mismatches.some((m) => m.includes('authReady')))
   console.log('✅ /health 结果按 TTL 复用，探活次数 =', healthHits)
 }
 
-console.log('=== [10/17] 拉起策略：托管 pipes vs detach 解耦 ===')
+console.log('=== [10/18] 拉起策略：托管 pipes vs detach 解耦 ===')
 assert.equal(isAlive(process.pid), true)
 assert.equal(isAlive(0), false)
 assert.equal(isAlive(-1), false)
@@ -545,7 +545,7 @@ assert.equal(detachedQuiet.detached, true)
 const detachedLogged = buildSpawnPlan({ serverDir: 'X:/srv', detach: true, logFile: 'X:/log.txt' }, { stdout: 7, stderr: 8 })
 assert.deepEqual(detachedLogged.stdio, ['ignore', 7, 8])
 
-console.log('=== [11/17] 进程树回收：孙进程必须一起带走 ===')
+console.log('=== [11/18] 进程树回收：孙进程必须一起带走 ===')
 // 复现真机泄漏的形态：父进程再起一个孙进程（后端 -> headless Chrome 就是这个形状）。
 // 旧的 child.kill() 只杀父，孙进程变孤儿继续占 CDP 端口。
 const grandScript = 'const{spawn}=require("child_process");'
@@ -581,7 +581,7 @@ await new Promise((r) => ghost.once('exit', r))
 const ghostResult = killProcessTree(ghost.pid)
 assert.equal(ghostResult.ok, true, `杀已退出的进程应幂等成功: ${ghostResult.detail}`)
 
-console.log('=== [12/17] detach 才真解耦：托管后端会随拉起它的那个进程退出而被 EPIPE 带走 ===')
+console.log('=== [12/18] detach 才真解耦：托管后端会随拉起它的那个进程退出而被 EPIPE 带走 ===')
 // 用一个会持续写 stdout 的桩"后端"复现真实形状（真后端 = node dist/index.js start + 心跳日志）。
 // 托管模式 stdio 是管道：拉起者一退，管道断裂，桩进程因 EPIPE 自杀；detach 模式必须活下来。
 const stubDir = mkdtempSync(join(tmpdir(), 'dwb-lifecycle-'))
@@ -690,7 +690,7 @@ try {
   }
 }
 
-console.log('=== [13/17] 子进程环境变量白名单 ===')
+console.log('=== [13/18] 子进程环境变量白名单 ===')
 const hostEnv = {
   PATH: 'C:\\Windows\\system32',
   SYSTEMROOT: 'C:\\Windows',
@@ -729,7 +729,7 @@ assert.ok(built.keys.every((k) => ENV_BASE_ALLOWLIST.includes(k) || k.startsWith
 assert.equal(buildChildEnv({ WEIRD: 'v', OTHER: 'x' }, { extraKeys: ['WEIRD'] }).env.WEIRD, 'v')
 assert.ok(!('OTHER' in buildChildEnv({ WEIRD: 'v', OTHER: 'x' }, { extraKeys: ['WEIRD'] }).env))
 
-console.log('=== [14/17] API Key 解析优先级、mtime 缓存与缺失告警 ===')
+console.log('=== [14/18] API Key 解析优先级、mtime 缓存与缺失告警 ===')
 // 让本段与宿主环境无关（DS_API_KEY 会参与优先级）
 const savedDsKey = process.env.DS_API_KEY
 delete process.env.DS_API_KEY
@@ -791,7 +791,7 @@ try {
   resetApiKeyCache()
 }
 
-console.log('=== [15/17] 配置样板自检（守门员也要有人守）===')
+console.log('=== [15/18] 配置样板自检（守门员也要有人守）===')
 // 正例：仓库里的样板必须无问题，且必需键齐全
 const sampleText = readFileSync(fileURLToPath(new URL('../cordis.patch.yml', import.meta.url)), 'utf8')
 const sampleCheck = checkConfig(sampleText)
@@ -836,7 +836,7 @@ assert.deepEqual(checkSampleHygiene('# serverDir: whatever'), [], '注释里的�
 assert.ok(checkSampleHygiene(sampleText.replace('# serverDir:', 'serverDir:')).length > 0, '生效的 serverDir 没被拦住')
 console.log('✅ 配置自检：正例通过，Tab / 缺键 / 缺入口 / 公网绑定 / 非法枚举 / 本机绝对路径 全部被抓住')
 
-console.log('=== [16/17] 后端目录与日志路径解析（可移植性）===')
+console.log('=== [16/18] 后端目录与日志路径解析（可移植性）===')
 {
   const root = mkdtempSync(join(tmpdir(), 'dwb-paths-'))
   const mkBackend = (rel) => {
@@ -907,7 +907,7 @@ console.log('=== [16/17] 后端目录与日志路径解析（可移植性）==='
   console.log('✅ 解析顺序：配置 → env → 指针 → 发现；过期配置只记录不否决')
 }
 
-console.log('=== [17/17] 后端能力契约：旧构建拒绝复用而不是静默退化 ===')
+console.log('=== [17/18] 后端能力契约：旧构建拒绝复用而不是静默退化 ===')
 {
   const full = {
     ok: true,
@@ -974,6 +974,93 @@ console.log('=== [17/17] 后端能力契约：旧构建拒绝复用而不是静�
   const accepted = await ensureAgainst(full, {})
   assert.equal(accepted.ok, true)
   console.log('✅ 契约不满足 → BACKEND_STALE（不可重试）；strictBackend=false 可降级为告警')
+}
+
+console.log('=== [18/18] 配置活读：改配置不必重启客户端 ===')
+{
+  // 用同一个适配器实例，中途改配置对象，验证下一轮请求取到新值。
+  const live = { baseUrl: 'http://127.0.0.1:9', autoStart: false, defaultMaxTokens: 8192, maxContextWindow: 1000 }
+  let disposed = 0
+  const fakeManager = {
+    ensure: async () => HEALTH_OK,
+    dispose: () => { disposed += 1 },
+    serverDir: () => '',
+    health: () => HEALTH_OK,
+  }
+  const liveAdapter = new DeepSeekWebApiAdapter(() => live, fakeManager, null)
+
+  const first = await liveAdapter.resolveModel(PROVIDER_ID, 'deepseek-web-thinking')
+  assert.equal(first.defaultMaxTokens, 8192)
+  live.defaultMaxTokens = 4321
+  live.maxContextWindow = 222
+  const second = await liveAdapter.resolveModel(PROVIDER_ID, 'deepseek-web-thinking')
+  assert.equal(second.defaultMaxTokens, 4321, '请求侧配置没有活读到新值')
+  assert.equal(second.context.contextWindow, 222)
+  assert.equal(disposed, 0, '只改请求侧配置不该重建后端管理器')
+
+  // 改到影响后端进程的项（baseUrl）→ 旧管理器必须被回收，新的才建起来
+  const managerBefore = liveAdapter.ensureManager()
+  live.baseUrl = 'http://127.0.0.1:8787'
+  const managerAfter = liveAdapter.ensureManager()
+  assert.equal(disposed, 1, '后端相关配置变更后没有回收旧管理器')
+  assert.notEqual(managerBefore, managerAfter, '没有建出新的后端管理器')
+
+  // 代际隔离：prepareCall 之后就算配置变了，本轮请求仍用当时那一代
+  const boundCfg = { autoStart: false, apiKey: 'k', maxContextWindow: 1000 }
+  const boundManager = {
+    ensure: async () => HEALTH_OK,
+    dispose: () => {},
+    serverDir: () => '',
+  }
+  let sawUrl = ''
+  const spyServer = createServer((req, res) => {
+    if (req.url === '/health') {
+      res.writeHead(200, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify(HEALTH_OK))
+      return
+    }
+    const body = []
+    req.on('data', (b) => body.push(b))
+    req.on('end', () => {
+      res.writeHead(200, { 'Content-Type': 'text/event-stream' })
+      res.write('data: {"choices":[{"delta":{"content":"用当代配置完成"}}]}\n\n')
+      res.write('data: {"choices":[{"finish_reason":"stop"}]}\n\n')
+      res.write('data: [DONE]\n\n')
+      res.end()
+    })
+  })
+  await new Promise((resolve) => spyServer.listen(0, '127.0.0.1', resolve))
+  const boundUrl = `http://127.0.0.1:${spyServer.address().port}`
+  try {
+    const boundAdapter = new DeepSeekWebApiAdapter(() => ({ ...boundCfg, baseUrl: boundUrl }), boundManager, null)
+    const prepared = await boundAdapter.prepareCall(PROVIDER_ID, 'deepseek-web-thinking')
+    // 本轮准备完之后，配置源被改成死地址：本轮 stream 必须仍然走准备时那一代
+    const original = boundAdapter.stream.bind(boundAdapter)
+    boundAdapter.stream = (model, options, opts, manager) => {
+      sawUrl = (opts || {}).baseUrl
+      return original(model, options, opts, manager)
+    }
+    const out = []
+    for await (const chunk of prepared.stream({ messages: [{ role: 'user', content: 'x' }] })) out.push(chunk)
+    assert.equal(sawUrl, boundUrl, '本轮请求没有用上准备时那一代的配置')
+    assert.equal(out.find((c) => c.type === 'finish').reason.kind, 'stop')
+    assert.ok(out.some((c) => c.type === 'text-delta'))
+  } finally {
+    await new Promise((resolve) => spyServer.close(resolve))
+  }
+
+  // apply() 之后 dispose 事件要能回收懒建的管理器
+  const applied = apply({
+    llm: { registerAdapter: () => () => {}, registerConfigurableProviders: () => {} },
+    logger: { info() {}, warn() {}, debug() {} },
+    on: () => {},
+  }, { baseUrl: 'http://127.0.0.1:9', autoStart: false })
+  assert.ok(applied && typeof applied.dispose === 'function', 'apply 未返回适配器句柄')
+  applied.ensureManager()
+  assert.ok(applied._manager, '管理器未按需创建')
+  applied.dispose()
+  assert.equal(applied._manager, null, 'dispose 后仍留着管理器')
+  console.log('✅ 配置按当代取用、后端相关变更重建管理器、卸载能回收')
 }
 
 // 触发 dispose
