@@ -17,8 +17,12 @@
    - `reasoning_content` → DSH `reasoning-delta`（原生深度思考折叠气泡渲染，边生成边推送）
    - `content` → DSH `text-delta`（工具回合的正文在反代解析完协议文本后一次性下发，避免半截标记）
    - `tool_calls` → DSH 原生 `tool-call-delta`
-5. **协议残留兜底**：若反代返回的正文里仍有未解析的工具协议标记（DSML / 文本协议），插件不再把它当普通回答静默结束回合，而是上报可重试错误 `PROTOCOL_LEAK`。
-6. **不污染工具列表**：遵循 DSH 设计哲学，不导出任何 Action 工具。
+5. **协议残留兜底**：若反代返回的正文里仍有未解析的工具协议标记（DSML / 文本协议），插件不再把它当普通回答静默结束回合，而是上报可重试错误 `PROTOCOL_LEAK`；整轮零产出（无正文、无思考、无调用）同样上报 `EMPTY_RESPONSE`，交给内核按重试策略处理。
+6. **真实 token 计量**：请求带 `stream_options.include_usage`，反代把上游累计输出 token 挂在最后一个 chunk 上；插件只在拿不到真实值时才估算，且估算基数包含 system 提示与全部工具 schema，中文按 1 字符 1 token 计（旧实现一律 `/3`，输入侧被低报数倍）。
+7. **稳定错误码与中止语义**：HTTP 状态按内核词表分流 —— 401/403 `AUTH`、402 `QUOTA`、429 `RATE_LIMIT`（透传 `Retry-After`）、400/413/422 `INVALID_REQUEST`、上下文超长 `CONTEXT_WINDOW_EXCEEDED`、5xx `SERVER`、其余 `HTTP_<status>`；只有真正值得重试的码进 `retryableCodes`，用户点“停止”一律 `ABORTED`（不进重试）。
+8. **消息保真**：历史里的 `system` / `developer` 角色照样透传（旧实现只认 `options.system`，其余静默丢弃）；工具描述默认完整下发（旧实现砍成首行，`workflow` 曾丢 81% 说明）；图片等非文本 block 会显式告警，不再变成空串。
+9. **归因头**：每个 provider HTTP 请求都带 `attributionHeaders()`（内核 helper 不可用时退化为字面量），符合 LlmAdapter 契约。
+10. **不污染工具列表**：遵循 DSH 设计哲学，不导出任何 Action 工具。
 
 ---
 
@@ -48,10 +52,15 @@ cd C:\Users\Admin\DeepSeek_Harness\dsh-client-config\plugins\dsh-deepseek-web-ap
         autoStart: true
         startTimeoutMs: 60000
         maxContextWindow: 128000
-        defaultMaxTokens: 8192
+        defaultMaxTokens: 32768     # 申报给 DSH 的单轮输出预留（上游不强制 max_tokens）
+        toolDescriptionMaxChars: 0  # 0 = 工具描述完整下发；>0 才按字符预算裁剪
         toolReasoning: 'clean'   # 注入后端 DS_TOOL_REASONING：clean 才能实时流式深度思考
         tools: 'text'            # 注入后端 DS_TOOLS：text = JSON 协议，native = 网页标记协议
 ```
+
+> `defaultMaxTokens` 不会真的限制输出：网页端上游不接受 token 上限（反代 `docs/api.md` 已说明），
+> 它只是告诉 DSH“单轮最多可能吐多少”，内核据此预留上下文水位。实测单轮可产出 6 万字符（约 2 万 token），
+> 所以默认值取 32768；写小了会让压缩/截断决策过于乐观。
 
 > `toolReasoning` / `tools` 只在插件**自己拉起**后端进程时生效；如果 8787 已经被别的进程占用，插件会直接复用（复用实例的环境变量由那次启动决定）。
 
@@ -74,13 +83,16 @@ pnpm login
 ### 5. 重启客户端
 
 完全退出 `DeepSeek Harness.exe`（右键托盘完全退出），重新打开客户端。在新建会话顶部的**模型选择器**中即可选择：
-- **DeepSeek Web API (反代)** → `deepseek-v4-flash` / `deepseek-v4-pro`。
+- **DeepSeek Web API (反代)** → `deepseek-web-flash`（极速）/ `deepseek-web-thinking`（深度思考）。
 
 ---
 
 ## 验证与测试
 
 ```powershell
-node test/smoke.mjs                    # 契约测试与 SSE 增量模拟
+node test/smoke.mjs                    # 契约、纯函数与 SSE 增量模拟（含错误码/中止/usage/归因头）
 node test/preparecall_regression.mjs   # 真实 DSH LlmRuntime 回归
+node test/live_e2e.mjs                 # 真机：由插件自己拉起后端并跑一次真实工具回合（需已登录）
 ```
+
+`live_e2e.mjs` 会占用 8787 并真实调用一次网页端，跑完**不会**回收后端进程（留给客户端复用）。

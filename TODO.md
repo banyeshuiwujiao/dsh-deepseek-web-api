@@ -32,7 +32,7 @@
 
 ## P0 —— 会直接影响正确性/额度结算的缺口
 
-- [ ] **P0-1 usage 全链路缺失,插件用错误口径估算顶替**
+- [x] **P0-1 usage 全链路缺失,插件用错误口径估算顶替** —— 已修,见文末「P0 落地记录」
   证据:实测探针里最终 chunk `usage=null`;反代 `chatCompletions.ts` 流式分支只写 `[DONE]`,
   `chatStream.ts#finalChunk` 只带 `conversation`/`previous_response_id`,**从不带 usage**;
   插件 `provider.js:384` 的 `if (chunkData?.usage)` 因此永远不成立,100% 走 `:404` 的兜底估算。
@@ -42,40 +42,40 @@
   (`updates.ts:75`)写进 `finalChunk.usage`;③插件加 `sawUsage` 标志,**只在没收到真实 usage 时**才发估算,
   并把 system+tools 计入估算基数。
 
-- [ ] **P0-2 工具 description 被砍成首行,`workflow` 丢了 81% 的说明**
+- [x] **P0-2 工具 description 被砍成首行,`workflow` 丢了 81% 的说明** —— 已修,见文末「P0 落地记录」
   证据:`provider.js:133` `String(t.description||'').split('\n')[0]`;真机 52 个工具共 13393 字符说明,
   插件只保留 12043,**丢 1350 字符(10.1%),其中 `workflow` 1667 → 317**。
   反代 `promptBuild.ts:196` 是把工具定义原样注入提示词的,所以这里砍掉的就是模型永远看不到的部分。
   改法:默认不截断(反代已按指纹缓存,重复注入不额外花钱);若要控体积,改成"按总预算裁剪 + 记录被裁工具名 + 可配置",
   并在 smoke 里断言 `workflow` 的多行说明完整透传。
 
-- [ ] **P0-3 `defaultMaxTokens: 8192` 是个假承诺**
+- [x] **P0-3 `defaultMaxTokens: 8192` 是个假承诺** —— 已修,见文末「P0 落地记录」
   证据:插件请求体(`provider.js:225`)**不含 `max_tokens`**;反代全仓 `grep max_tokens` 零命中(只有 `models.ts` 解析 thinking)。
   真机第 4 步一次吐出 38474 字符的 `write` 参数(远超 8192 token),说明上限既没传也没生效。
   改法:二选一并写进文档 —— 要么插件透传 `options.maxTokens`、反代映射到上游;
   要么 `resolveModel` 不再返回 `defaultMaxTokens`,避免 DSH 按 8192 规划截断/压缩。
 
-- [ ] **P0-4 用户中止被上报成可重试的 TRANSPORT**
+- [x] **P0-4 用户中止被上报成可重试的 TRANSPORT** —— 已修,见文末「P0 落地记录」
   证据:`signal` 只传给了 `fetch`(`:247`),读流循环(`:287`)不检查 `signal.aborted`;
   中止时 `reader.read()` 抛错落到 `:434` 的通用 catch,产出 `code:'TRANSPORT'` —— 而 `TRANSPORT` 在
   `providerRetryPolicy.retryableCodes`(`:154`)里,`maxRetries:2`。用户点"停止"可能触发重试。
   改法:catch 里先判 `signal?.aborted === true` → `kind:'aborted'`;并在 `finally` 里 `reader.cancel()`/`releaseLock()`
   释放连接(现在 `PROTOCOL_LEAK` 提前 return 也会把 HTTP body 挂着)。
 
-- [ ] **P0-5 所有非 2xx 都当 SERVER 重试,401/400 白烧两轮**
+- [x] **P0-5 所有非 2xx 都当 SERVER 重试,401/400 白烧两轮** —— 已修,见文末「P0 落地记录」
   证据:`provider.js:261-272` 统一产出 `code:'SERVER'`(可重试)。API Key 轮换失效(401)、请求体非法(400)
   都会被重试 2 次(1.5s→5s 退避),最后给用户一句无关痛痒的报错。
   改法:按状态码分流 —— 401/403 → `AUTH`(不可重试,提示"检查 `data/.api-key`"),400/422 → `INVALID_REQUEST`(不可重试),
   429 → `RATE_LIMIT`(可重试,退避拉长),5xx/502 → `SERVER`。反代的 `HttpError` 已带状态码,透传即可。
 
-- [ ] **P0-6 `messages` 里的 system 角色会被静默丢弃(待确认 + 加固)**
+- [x] **P0-6 `messages` 里的 system 角色会被静默丢弃(待确认 + 加固)** —— 已修,见文末「P0 落地记录」
   证据:`formatOpenAiMessages`(`:95-121`)只处理 `user`/`assistant`/`tool` 三种 role,其余**直接跳过**;
   真机日志里存在独立的 `system/message` 事件(seq 15,17235 字符)。目前无法从会话日志证明它走的是 `options.system`
   还是 `messages[]` —— 一旦是后者,整段系统提示词不会到达模型,而插件不会有任何报错。
   改法:`role==='system'` 时并入前导 system(或原样透传),并在 smoke 里加一条"messages 含 system 角色"的断言。
   顺带:未知 role 至少要 `logger.warn`,不要静默吞。
 
-- [ ] **P0-7 非文本 block 被静默压成空串,图片能力名不副实**
+- [x] **P0-7 非文本 block 被静默压成空串,图片能力名不副实** —— 已修(告警口径),见文末「P0 落地记录」
   证据:`textOf`(`:71-85`)只收 `type==='text'`;DSH 工具表里有 `read_image`,`listModels`/`resolveModel`
   又只声明 `inputModalities:['text']`。图片内容会被丢掉且无提示。
   改法:短期 —— 遇到 image/其他 block 时 `logger.warn` 并明确告知"网页反代不支持图片输入";
@@ -109,7 +109,7 @@
   同时 fetch 只受 DSH 的 signal 约束,上游卡死就会永久挂着(反代侧也没有 inactivity timeout)。
   改法:健康状态缓存 30s(或仅在传输失败后重新探活);加"连续 N 秒无字节 → `TIMEOUT`(可重试)"与总时长上限。
 
-- [ ] **P1-5 错误路径不关闭已打开的 block**
+- [x] **P1-5 错误路径不关闭已打开的 block** —— 顺手已修(见「P0 落地记录」第 9 条),索引收敛仍待做
   证据:`PROTOCOL_LEAK` 提前 return(`:427`)与 catch 分支(`:436`)都没有补 `block-end`;
   收尾处的 `block-end`(`:399`)复用 `blockIndex` 但不自增,后续再开块会与它撞索引。
   改法:`try/finally` 统一收口;索引分配收敛成一个 `nextIndex()`。
@@ -225,7 +225,59 @@
 - 流式探针(单工具、极简提示):推理 22 段自 +3940ms 起,`tool_calls` 与 `finish_reason` 同在 +4297ms,
   `usage=null`,`conversation=4a9cdaf8-310f-4f54-9ae0-b52febf862d8`。
 
-## 附:本轮已完成(不要再改)
+## 附:P0 落地记录(本轮已修,含验证口径)
+
+代码分布:反代 `git-repo/deepseek-web-api`(usage 那半边)+ 本插件 `lib/openai.js`(新)、`lib/kernel.js`(新)、`lib/provider.js`。
+
+1. **P0-1 usage**
+   - 反代:`stream_options.include_usage` 为真时,最后一个 chunk 挂 `usage`(上游 `accumulated_token_usage` →
+     `completion_tokens`/`total_tokens`,`prompt_tokens` 保持 0);不开启时行为与之前完全一致。plain 与 tool 两条流式路径都覆盖,
+     工具重试后报的是真正下发那一次的计数。
+   - 插件:请求体固定带 `stream_options:{include_usage:true}`;usage 只记录不即时下发,**整轮只发一个 usage 块**
+     (内核 `addUsage` 会把多个 usage 块相加,重复发=重复计费)。
+   - 输出口径:有真实值就用真实值;输入口径上游永远不报,所以**始终按真正上线的载荷估算**
+     (`system + 历史 + 工具 schema` 的 JSON),估算函数改为 CJK 1 字符 1 token、其余 4 字符 1 token(旧的一律 /3)。
+   - 验证:smoke `[5/7]` 断言"真实 usage 存在 → 恰好 1 个 usage 块且等于 `{12,25}`"、
+     "无 usage → 输入估算 > 10(证明 system/tools 已计入)且输出等于 `estimateTokens(正文)`"。
+2. **P0-2 工具描述**:默认完整透传;新增 `toolDescriptionMaxChars`(默认 0=不裁剪,>0 才裁并加省略号)。
+   smoke 断言上线请求体里 `tools[0].function.description` 等于原始多行文本。
+3. **P0-3 maxTokens**:默认值 8192 → **32768**,并在 README/patch 注释里写明"上游不强制,仅用于向 DSH 申报单轮输出预留
+   (内核 `reservedCompletionTokens` 按它留水位)";DSH 传来的 `options.maxTokens` 现在会透传成 `max_tokens`(反代记录但不强制)。
+   `preparecall_regression` 实测真实 LlmRuntime 的 `config.maxTokens` 已变成 32768。
+4. **P0-4 中止**:读流循环检查 `signal.aborted`;所有异常统一走 `transportFailure()`,
+   `signal.aborted` 或 `AbortError` → `kind:'aborted'` + `ABORTED`(不在 `retryableCodes` 里);`finally` 里 `reader.cancel()` 释放连接。
+   smoke 用"挂住不结束的响应 + 80ms 后 abort"实测到 `aborted`。
+5. **P0-5 错误码**:新增 `failureCodeForStatus()` 对齐内核词表 —— 401/403 `AUTH`、402 `QUOTA`、429 `RATE_LIMIT`、
+   400/413/422 `INVALID_REQUEST`、命中上下文超长措辞 `CONTEXT_WINDOW_EXCEEDED`、5xx `SERVER`、其余 `HTTP_<status>`;
+   `failure` 带 `status`,429 透传 `Retry-After` 为 `providerRetryAfterMs`。
+   `retryableCodes` 收敛为 `EMPTY_RESPONSE / RATE_LIMIT / SERVER / TIMEOUT / TRANSPORT / PROTOCOL_LEAK`,
+   smoke 显式断言 `AUTH/QUOTA/INVALID_REQUEST/CONTEXT_WINDOW_EXCEEDED` **不在**其中。
+6. **P0-6 消息保真**:`system`/`developer` 角色一律透传,未知角色告警后跳过(不再静默吞);
+   缺失 `id` 的工具调用改用自增兜底 id(`call_dsh_N`),避免同一毫秒撞号。smoke 断言角色序列与两条兜底 id 不相同。
+7. **P0-7 非文本 block**:`collectText()` 返回 `{text, skipped}`,图片等被丢弃的 block 类型会通过 `ctx.logger.warn`
+   明确告警(网页反代只支持纯文本);`inputModalities` 仍为 `['text']`,如实申报。
+8. **P0-8(审计时新发现)归因头**:适配器契约要求"每个 provider HTTP 请求都带 `attributionHeaders()`",旧实现完全没带。
+   新增 `lib/kernel.js` 接缝(全插件唯一允许 import `@deepseek-ai/*` 的地方,惰性 + 缓存 + 字面量兜底,
+   与 `dsh-our-free-model/adapter/kernel.js` 同一套做法)。smoke 从 mock server 侧断言上线请求确实带 `user-agent`。
+9. **顺手修掉 P1-5 的一半**:错误/提前 return 路径现在也会补 `block-end`(`closeOpenBlock()`),
+   smoke 用"流中途报错"断言 `block-start` 与 `block-end` 数量相等;索引分配收敛成一个 `nextIndex()` 仍待做。
+10. **顺手加固(原 bug 同类)**:整轮零产出(无正文、无思考、无调用)不再静默 `stop`,改报 `EMPTY_RESPONSE`
+    交给内核重试;协议残留检测同时覆盖"只有推理、推理里全是协议标记"的形态。
+11. **思考开关**:`resolveThinkingEnabled()` 改为查 `KNOWN_MODELS.thinking`,只有未知模型才回退到名字匹配
+    (旧的 `model.includes('pro')` 会把任何带 pro 字样的模型误开思考)。
+
+**真机验证(`test/live_e2e.mjs`,2026-10-20 19:15)**:这次是**插件自己 spawn 后端**(PID 由 `createBackendManager` 拉起,
+`isRunning=true`),P1-6 里"env 注入路径从未被真机执行过"的疑点已消除。一次真实工具回合:
+首个推理增量 +2676ms、35 段推理增量实时下发(证明 `DS_TOOL_REASONING=clean` 生效)、
+结构化 `pwsh` 调用参数完整、正文无协议残留、`finish=tool-calls`、总耗时 3058ms;
+`usage` 恰好一个块 `{inputTokens:116, outputTokens:673}` —— 673 是上游真实累计输出 token(不再是字符估算),
+116 是输入估算(上游 `prompt_tokens` 恒为 0,只能估)。
+另:`preparecall_regression` 实测真实 LlmRuntime 的 `config.maxTokens` 已从 8192 变为 32768。
+
+**仍未做(P1 起)**:tool_calls 按 `index` 累积、工具回合正文增量下发、探活缓存与请求级超时、
+泄漏闸门前移、`/health` 版本与配置回显、插件侧每轮日志、日志落盘。
+
+
 
 - [x] 反代支持 DSML 解析并与文本协议按文档顺序合并(`dsmlCalls.ts` / `toolCalls.ts`)。
 - [x] 不完整协议片段不再被当作可信调用:标记 `protocolTruncated` 并触发后端重试(`toolOutcome.ts`)。
