@@ -28,6 +28,10 @@ netstat -ano | findstr ":8787 :9333"              # 反代端口与 Chrome CDP �
 | 长时间卡住后自动重来一轮 | `TIMEOUT` | `streamIdleTimeoutMs`（默认 120s）触发，属预期 |
 | 界面 75 秒只见思考不见正文 | 大参数工具回合（真机 `write` 38474 字符） | 已知设计取舍，见 `docs/protocols.md` 第 2 节（TODO P1-2） |
 | token 水位/压缩时机看着不对 | 每轮 debug 行的 `usage=输入/输出` | 输出是上游真值；输入上游从不报（`prompt_tokens: 0`），由插件按上线载荷估算（CJK 1 字 1 token） |
+| `read_image`（或任何要过模型路由的工具）**发起后几毫秒就失败**，正文是 `adapter returned invalid context metadata for provider "deepseek-web-api" model "…"` | 配置里的 `maxContextWindow` / `defaultMaxTokens` 的类型 | **不是"这个模型不能看图"**：内核逐字要求 `Number.isInteger(contextWindow) && > 0`，YAML/控制台里写成 `"128000"` 就会命中。0.3 起插件自己收口成 `Number` 并回落默认值，只留一条告警；老版本请把值改成不带引号的整数 |
+| 模型反复说"我看不了这张图"、或不停重试同一个读图动作 | 消息正文里的 `[image omitted because this model accepts text only; …]` | 网页反代确实无图像输入（`inputModalities: ['text']` 如实申报，**别改成谎报**：内核会另判 `does not declare image input`）。插件现在在这种占位符后补一条 `[no-image-input]` 指引：路径交给用户 / 换 DOM 与接口文本 / 请用户口述 |
+| 空回合报 `DeepSeek Web returned an empty turn (upstream-silent …)` | 同一行日志的 `emptyVerdict` / `streamEvents` / `droppedContentFrames` | `upstream-not-started`(502) 与 `upstream-silent`(504) 是上游可用性故障，可重试；`parser-dropped-content` 是我们的解析漏了新形态，重试无用，把 `conversation` + 该轮残片发给维护者。**这条文案与上下文长度无关**，别去砍对话历史 |
+| 需要"读出图里的东西"（二维码、验证码、页面截图） | 页面 DOM / 接口返回的文本 | **文字优先**：设备码登录页的二维码编码的就是一个 URL，`user_code` 也直接在 DOM/接口里（真机就是靠 `…/oauth-authorize?user_code=XXXX` 这行文字完成的）。本机没装任何图像解码库，纯靠像素解码属未验证路径，不要为它给插件加依赖（CI 有零依赖断言） |
 | 行为诡异、像跑了另一套后端 | `/health` 的 `version/toolReasoning/toolCalls` 与 `~/.dsh/deepseek-web-api.json` | 8787 上可能是别人（或你手工）起的进程。插件只树回收**自己拉起**的；不放心就杀掉再起 |
 
 ## 2. 明确**不是**本插件问题的两类失败

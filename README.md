@@ -49,6 +49,16 @@
     自动回收旧后端管理器并重建（会打一条 info/warn）。每代请求把自己那一份配置与管理器绑死，
     避免"准备时用新值、派发时又混进旧一代"。`apply()` 返回适配器句柄，卸载时回收懒建的管理器。
 20. **不污染工具列表**：遵循 DSH 设计哲学，不导出任何 Action 工具。
+22. **申报值自己收口**：`maxContextWindow` / `defaultMaxTokens` 一律 `Number()` + 正整数校验，非法就
+    回落默认值并告警。内核逐字校验这两个整数，字符串会让 `prepareCall` 抛 `INVALID_MODEL_CONTEXT`，
+    连带把 `read_image` 这类要过模型路由的工具在几毫秒内打死 —— 表现极像"模型不支持图"（真机代价：一次接入任务里 4 次读图全灭）。
+23. **图片被省略时给出下一步**：内核会把图片换成 `[image omitted … attachment sha256:…]` 文字，
+    插件认出它就补一条 `[no-image-input]` 指引（交路径给用户 / 走 DOM 与接口文本 / 请用户口述）；被丢弃的 block 告警也会带出
+    文件名与 attachment id。本模型仍如实申报无图像输入 —— 谎报只会把失败换成 `does not declare image input`。
+24. **空回合不再伪装成正文**：反代归因（`upstream-not-started` / `upstream-silent`）后按 502/504 抛真错误，
+    插件据流内 `error.status` 映射成可重试的 `SERVER`；判给解析器的那类（`parser-dropped-content`）保留原兜底路径，
+    因为把我们的 bug 说成"上游不可用"会让人白重试。
+
 21. **正文也能实时出字（可选）**：`streamContent: 'live'` 让后端把工具回合的正文也过一遍协议闸门再下发
     （闸门只扣住"可能是标记开头"的尾巴，已发出去的字绝不回收），长参数生成时不再只见思考气泡。
     默认 `buffered` 保持"正文只由权威解析决定"的最保真语义；两者都靠同一处实现，插件侧不重演判定逻辑。

@@ -21,6 +21,9 @@ import {
   failureCodeForStatus,
   retryAfterMs,
   resolveThinkingEnabled,
+  positiveIntOption,
+  countImageOmissions,
+  imageOmissionHint,
 } from '../lib/provider.js'
 import { createBackendManager, diffHealth, resolveApiKey, resetApiKeyCache } from '../lib/server.js'
 import { ENV_BASE_ALLOWLIST, buildChildEnv, buildSpawnPlan, isAlive, killProcessTree } from '../lib/process.js'
@@ -447,6 +450,29 @@ const opens = midError.chunks.filter((c) => c.type === 'block-start').length
 const closes = midError.chunks.filter((c) => c.type === 'block-end').length
 assert.equal(opens, closes, `block 未收尾: start=${opens} end=${closes}`)
 
+// P0-B2：反代把"归因后的空回合"改成流内错误帧带 status，插件必须认这个 status。
+// 504（上游开了回复却一字未出）是可重试的 SERVER；没有 status 才会退到 TRANSPORT。
+const attributedTurn = await withMockServer(
+  [
+    'data: {"choices":[{"delta":{"reasoning_content":"..."}}]}\n\n',
+    'data: {"error":{"message":"DeepSeek Web returned an empty turn (upstream-silent; the upstream opened a reply but produced no reasoning and no answer text). This is an upstream availability failure, unrelated to prompt size.","status":504}}\n\n',
+  ],
+  { messages: [{ role: 'user', content: 'x' }] },
+)
+const attributedFinish = attributedTurn.chunks.find((c) => c.type === 'finish')
+assert.equal(attributedFinish.reason.kind, 'error')
+assert.equal(attributedFinish.reason.failure.code, 'SERVER', `空回合被误判为 ${attributedFinish.reason.failure.code}`)
+assert.equal(attributedFinish.reason.failure.status, 504)
+assert.ok(
+  attributedTurn.chunks.filter((c) => c.type === 'text-delta').every((c) => !/empty turn/.test(c.text ?? '')),
+  '错误帧的文本被当成正文发给了用户',
+)
+assert.ok(
+  adapter.providerRetryPolicy().retryableCodes.includes('SERVER'),
+  'SERVER 必须仍可重试：上游可用性故障换一次机会是有意义的',
+)
+console.log('✅ 流内错误帧的 status 进入错误码：504 空回合 = 可重试 SERVER，不再伪装成正文')
+
 // P0-4：用户中止必须是 ABORTED（不可重试），不能被当成 TRANSPORT 再重试
 const controller = new AbortController()
 const abortedRun = withMockServer([], { messages: [{ role: 'user', content: 'x' }], signal: controller.signal }, { hang: true })
@@ -463,6 +489,60 @@ for await (const chunk of preAborted.stream('deepseek-web-flash', { messages: []
   preChunks.push(chunk)
 }
 assert.equal(preChunks[0].reason.kind, 'aborted')
+
+// P0-A2：申报给内核的两个整数必须是"真是正整数"。内核逐字校验
+// `Number.isInteger(context.contextWindow) && context.contextWindow > 0`，不合规抛
+// INVALID_MODEL_CONTEXT —— 那不只杀掉这一轮，连 read_image 这类要过模型路由校验的工具
+// 都会在几毫秒内死掉，看起来就像"这个模型不能看图"（真实事故：4 次读图全灭 + 5 小时绕圈）。
+{
+  const warned = []
+  const stringCfg = new DeepSeekWebApiAdapter(
+    { baseUrl: 'http://127.0.0.1:1', autoStart: false, maxContextWindow: '128000', defaultMaxTokens: '32768' },
+    null,
+    { warn: (m) => warned.push(String(m)), info: () => {}, debug: () => {}, error: () => {} },
+  )
+  const coerced = await stringCfg.resolveModel(PROVIDER_ID, 'deepseek-web-thinking')
+  assert.equal(typeof coerced.context.contextWindow, 'number', '字符串 maxContextWindow 没被强制成数字')
+  assert.equal(coerced.context.contextWindow, 128000)
+  assert.ok(Number.isInteger(coerced.defaultMaxTokens) && coerced.defaultMaxTokens > 0, '字符串 defaultMaxTokens 没被强制')
+  assert.equal(warned.length, 0, `合法值不该告警：${warned.join(' | ')}`)
+
+  const junkWarns = []
+  const junkCfg = new DeepSeekWebApiAdapter(
+    { baseUrl: 'http://127.0.0.1:1', autoStart: false, maxContextWindow: 'abc', defaultMaxTokens: 0 },
+    null,
+    { warn: (m) => junkWarns.push(String(m)), info: () => {}, debug: () => {}, error: () => {} },
+  )
+  const fellBack = await junkCfg.resolveModel(PROVIDER_ID, 'deepseek-web-thinking')
+  assert.equal(fellBack.context.contextWindow, 128000, '非法值没有回落默认值')
+  assert.ok(junkWarns.some((w) => w.includes('maxContextWindow')), '非法值没有留下可定位告警')
+  assert.equal(positiveIntOption('128000', 'maxContextWindow', 128000, () => {}), 128000)
+  assert.equal(positiveIntOption(-1, 'maxContextWindow', 128000, () => {}), 128000)
+  console.log('✅ 申报值类型强制：字符串收敛为正整数，非法值回落并告警（不再抛 INVALID_MODEL_CONTEXT）')
+}
+
+// P0-A1：内核会赶在插件之前把图片换成 `[image omitted …]` 占位文本，
+// 所以插件能做的不是"丢弃并告警"（那条分支在真实链路上永不触发），而是**当场告诉模型下一步**。
+{
+  assert.equal(countImageOmissions('a [image omitted because this model accepts text only; attachment sha256:deadbeef12] b'), 1)
+  assert.equal(countImageOmissions('no pictures here'), 0)
+  assert.equal(imageOmissionHint(0), '')
+  const hinted = formatOpenAiMessages({
+    messages: [{ role: 'tool', toolCallId: 'call_1', content: [{ type: 'text', text: '[image omitted because this model accepts text only]' }] }],
+  })
+  const body = hinted[0].content
+  assert.ok(body.includes('[no-image-input]'), '占位符没有换来行动指引')
+  assert.ok(/路径/.test(body) && /无图像输入/.test(body), '指引缺了"无图像/给路径"这两要素')
+
+  const skippedWarns = []
+  const withBlock = formatOpenAiMessages(
+    { messages: [{ role: 'user', content: [{ type: 'text', text: '看这张' }, { type: 'image', attachment: { name: 'qr.png', attachmentId: 'sha256:abc' } }] }] },
+    (m) => skippedWarns.push(m),
+  )
+  assert.ok(withBlock[0].content.includes('看这张'), '文本部分被图片处理带丢了')
+  assert.ok(skippedWarns.some((w) => w.includes('image(qr.png') && w.includes('sha256:abc')), `告警没带可定位信息: ${skippedWarns.join(' | ')}`)
+  console.log('✅ 图片占位符换成行动指引；被跳过的 block 告警带出文件名/attachment id')
+}
 
 console.log('=== [7/18] 后端不可用时的错误口径 ===')
 const offline = new DeepSeekWebApiAdapter({ baseUrl: 'http://127.0.0.1:1', autoStart: false })

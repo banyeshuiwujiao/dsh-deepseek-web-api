@@ -27,7 +27,7 @@
 
 ## P0-A —— 图像通路：本次事故的正身
 
-- [ ] **P0-A1 图片在到达插件之前就被内核换成占位文本，所以 P0-7 的"丢弃告警"在真实链路上永不触发。**
+- [x] **P0-A1 图片在到达插件之前就被内核换成占位文本，所以 P0-7 的"丢弃告警"在真实链路上永不触发。** —— 已修，见文末「本轮落地记录」
   内核取证（直读 `app.asar`，逐字）：`textOnlyImageText(ref)` →
   `[image omitted because this model accepts text only; attachment sha256:xxxxxxxx]`。
   插件侧的对应物是 `lib/openai.js:96-99` 的 `skipped` 分支（"消息中的 … 内容无法经网页反代转发，已丢弃（仅支持纯文本）"），
@@ -41,7 +41,7 @@
   —— **路径一直在消息里**，缺的只是"没有视觉时该拿路径做什么"这一句。
   验收：mock 一条含占位符的 tool 结果 → 断言插件送出的 prompt 同时含"无图像能力 / 路径 / 下一步"三要素；smoke 加用例。
 
-- [ ] **P0-A2 `context.contextWindow` 不做类型强制：一个字符串值会同时打断模型路由与图像工具。已本地复现。**
+- [x] **P0-A2 `context.contextWindow` 不做类型强制：一个字符串值会同时打断模型路由与图像工具。已本地复现。** —— 已修，见文末「本轮落地记录」
   内核校验（逐字）：
   `if (context !== void 0 && (!Number.isInteger(context.contextWindow) || context.contextWindow <= 0)) throw new LlmError('adapter returned invalid context metadata for provider "…" model "…"', 'INVALID_MODEL_CONTEXT')`
   插件（`lib/provider.js:223`）：`context: { contextWindow: opts.maxContextWindow }` —— **原样透传，不 coerce**；
@@ -62,7 +62,7 @@
   验收：smoke 两条（字符串配置 → 必须得到正整数；无法解析 → 必须回落并留告警）；
   `docs/troubleshooting.md` 症状表加一行："`read_image`/`prepareCall` 秒失败 + `INVALID_MODEL_CONTEXT` = 申报值类型不对，不是模型不支持图"。
 
-- [ ] **P0-A3 `inputModalities: ['text']` 申报是对的，但它换来的是"图片消失"，不是"图片可替代"。**
+- [x] **P0-A3 `inputModalities: ['text']` 申报是对的，但它换来的是"图片消失"，不是"图片可替代"。** —— ①②已落地、③给了结论，见文末「本轮落地记录」
   现状：`lib/provider.js:209`（`listModels`）与 `:222`（`resolveModel`）都申报 `['text']`。
   内核另一处（逐字）：`if (info.inputModalities === void 0 || !info.inputModalities.includes("image")) throw new AcpContentError('model "…" does not declare image input','invalid')`
   —— **假装支持图像只会把失败换一个错误码**，不能治本。要补的是替代路径，按成本三档，**先做 ①②**：
@@ -81,7 +81,7 @@
 
 ## P0-B —— 空回合归因的后续（上一轮的尾巴，别再靠猜）
 
-- [ ] **P0-B1 等一次真实空回合样本，按 `emptyVerdict` 分流错误码。**
+- [ ] **P0-B1 等一次真实空回合样本，按 `emptyVerdict` 分流错误码。** —— 分流本身已随 P0-B2 落地，**仍缺真实样本验证**
   归因已上线（`71db820`），但**新字段至今零样本**：`~/.dsh/logs/deepseek-web-api.log` 里还没有任何 `emptyVerdict` 行（最近一轮是 01:12 的成功 `tool-calls`）。
   务必别再写反的定性：15:18–15:36 UTC 的 `promptChars=301902 / 305013` **成功**（retry 1 后 `protocolShape:dsml` 恢复），
   15:43:40–15:49:14 UTC 窗口内 `634 / 4695 / 28213 / 79634 / 125238 / 257158 / 332109` **全空**
@@ -89,7 +89,7 @@
   分流口径：`upstream-not-started` / `upstream-silent` → 可重试（`SERVER`/`TIMEOUT`），文案写"上游未响应"；
   `parser-dropped-content` → 修我们的正常化；只有真拿到上游超限措辞才 `CONTEXT_WINDOW_EXCEEDED`
   （该码在 `lib/provider.js:196` 的 `retryableCodes` 里**故意不可重试**，用错会让人去砍对话历史）。
-- [ ] **P0-B2 `EMPTY_TOOL_RESPONSE_TEXT` 仍在伪装成正常正文。**
+- [x] **P0-B2 `EMPTY_TOOL_RESPONSE_TEXT` 仍在伪装成正常正文。** —— 已修，见文末「本轮落地记录」
   `src/deepseek/toolOutcome.ts:5` + `src/deepseek/client.ts:81/111`：判空后把兜底串当 `content` 下发，DSH 于是看到"有正文的一轮"，
   用户读到 `DeepSeek Web did not produce a usable tool call or final answer after one automatic retry.`，
   而插件 `lib/provider.js:577-584` 的 `EMPTY_RESPONSE` 分支永远走不到。
@@ -131,3 +131,33 @@
 3. **内核侧事实靠直读 `app.asar`**（182MB 二进制 grep；本轮有效的检索词：`textOnlyImageText`、`accepts text only`、`INVALID_MODEL_CONTEXT`、
    `does not declare image input`、`detachedModalities`）。别再猜 `LlmAdapter` 契约 —— 上一轮就是因为猜，把 `defaultMaxTokens`（预留）当成真实上限写进了文档。
 4. 插件日志 `~/.dsh/logs/deepseek-web-api.log` 时间戳是 **UTC**（本地 = +8），与会话对齐时先换算。
+
+---
+
+## 附：本轮落地记录（P0-A / P0-B，2026-10-21）
+
+1. **P0-A2 申报值收口（插件）**：`lib/provider.js` 新增导出 `positiveIntOption(raw, key, fallback, warn)`，
+   `resolveModel` 里 `maxContextWindow` 与 `defaultMaxTokens` 都过它 —— 非法值**回落 + 一条指名道姓的告警**，
+   而不是让 `prepareCall` 把异常抛给内核（内核那句 `INVALID_MODEL_CONTEXT` 会连带打死 `read_image`，
+   看起来完全像"这个模型不支持图"）。smoke 新增：`'128000'` → 必须得到数字 128000 且**不告警**；`'abc'`/`0` → 回落 128000 且告警点名 `maxContextWindow`。
+2. **P0-A1 + A3①② 图片可自救（插件）**：`lib/openai.js`
+   ① `collectText()` 的 skipped 标签现在带可定位信息（`image(qr.png sha256:… 450x450)`）；
+   ② 新增 `countImageOmissions(text)` + `imageOmissionHint(count)`：认出内核的 `[image omitted …]` 就在该条消息后补
+   `[no-image-input] …` 一句，明确"重试读图不会改变结果"+三条替代路径；`KNOWN_MODELS` 两条 description 直接写"只接受纯文本，无图像输入"。
+   smoke 断言指引三要素（无图像输入 / 路径 / 下一步）与告警带出文件名+attachment id。
+   `docs/troubleshooting.md` 加了"文字优先"一行：真机里救场的是 `…/oauth-authorize?user_code=XXXX` 这行文字，不是像素解码；
+   本机没有任何图像解码库，**纯像素解码属未验证路径**，也不许为此给插件加依赖（CI 有零依赖断言）。
+3. **P0-A3③ 结论（不做）**：上游附件通路在本项目血脉里就不存在 —— 反代 `src/deepseek/completion.ts:44` 发 `"ref_file_ids": []`，
+   `SPEC.md:73` 把同一个空数组写进请求契约，vendored 参考实现 `_reference/server.mjs` 全文只有这一处、**没有任何上传路径**，
+   `docs/api.md` 的 Not supported 第一条就是它。要支持需要逆向了私有上传接口（鉴权 + 文件对象结构 + 会话血缘），
+   属独立立项，需要授权与专门验证；本轮不动。
+4. **P0-B2 空回合出真错误码**：
+   - 反代 `src/deepseek/streamWatch.ts` 新增 `emptyUpstreamFailure(evidence, promptChars)`：`upstream-silent` → `HttpError(504)`、
+     `upstream-not-started` → `HttpError(502)`、`parser-dropped-content` → **返回 null**（那是我们的解析漏了，说成"上游不可用"会让人白重试）。
+   - 重试编排放进新模块 `src/deepseek/toolRecovery.ts`（`client.ts` 因此从 308 行回到 284 行，仍在 300 行守卫内）：
+     判空且有归因时**抛出**，不再把兜底串当正文下发。
+   - `src/api/chatCompletions.ts` 的流内错误帧现在带 `error.status`（响应头早已 flush，插件拿不到 status 就按可重试的 `TRANSPORT` 处理）。
+   - **文案约束（踩出来的）**：客户端把 `context length … limit` 这类措辞映射成**不可重试**的 `CONTEXT_WINDOW_EXCEEDED`，
+     所以失败文本连"否定它"都不能写。现在写 `unrelated to prompt size`，测试断言消息**不含** `/context\s+(length|window)/i`。
+   - 验证：反代 20 个测试文件 / **166 用例**全绿（原 158 + 新增 8），`pnpm lint`（含 300 行与英文注释两道守卫）、`pnpm build`、`tsc --noEmit` 全通过；
+     插件 18 段 smoke + config_check + prepareCall 回归全绿，新增两条断言（504 → 可重试 `SERVER`；错误帧文本不混进正文）。
