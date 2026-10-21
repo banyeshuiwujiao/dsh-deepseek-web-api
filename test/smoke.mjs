@@ -41,12 +41,13 @@ console.log('=== [1/18] 基础格式化：文本抽取与工具转换 ===')
 assert.equal(textOf('hello'), 'hello')
 assert.equal(textOf([{ type: 'text', text: 'part 1' }, { type: 'text', text: 'part 2' }]), 'part 1\npart 2')
 
-// 非文本 block 必须被报告出来，不能静默变空串
-const collected = collectText([{ type: 'text', text: '看图' }, { type: 'image', bytes: 12 }])
+// 非文本 block：image 现在单独走图片通路（不再进 skipped）；真正不认识的类型仍要被报告
+const collected = collectText([{ type: 'text', text: '看图' }, { type: 'mystery-block', bytes: 12 }])
 assert.equal(collected.text, '看图')
-assert.deepEqual(collected.skipped, ['image'])
+assert.deepEqual(collected.skipped, ['mystery-block'])
+assert.equal(collected.images.length, 0)
 
-const formattedMsgs = formatOpenAiMessages({
+const formattedMsgs = await formatOpenAiMessages({
   system: '你是助手',
   messages: [
     { role: 'user', content: '你好' },
@@ -64,7 +65,7 @@ assert.equal(formattedMsgs[3].role === 'tool' ? formattedMsgs[3].tool_call_id : 
 
 // P0-6：历史里的 system/developer 角色必须透传，未知角色必须告警而不是静默丢掉
 const warnings = []
-const roleMsgs = formatOpenAiMessages(
+const roleMsgs = await formatOpenAiMessages(
   {
     system: '外层系统提示',
     messages: [
@@ -86,7 +87,7 @@ assert.equal(warnings.length, 1)
 assert.match(warnings[0], /mystery/)
 
 // 缺少 id 的工具调用要拿到互不相同的兜底 id
-const idMsgs = formatOpenAiMessages({
+const idMsgs = await formatOpenAiMessages({
   messages: [
     { role: 'assistant', content: '', toolCalls: [{ name: 'a' }, { name: 'b' }] },
   ],
@@ -534,7 +535,7 @@ assert.equal(preChunks[0].reason.kind, 'aborted')
   assert.equal(countImageOmissions('a [image omitted because this model accepts text only; attachment sha256:deadbeef12] b'), 1)
   assert.equal(countImageOmissions('no pictures here'), 0)
   assert.equal(imageOmissionHint(0), '')
-  const hinted = formatOpenAiMessages({
+  const hinted = await formatOpenAiMessages({
     messages: [{ role: 'tool', toolCallId: 'call_1', content: [{ type: 'text', text: '[image omitted because this model accepts text only]' }] }],
   })
   const body = hinted[0].content
@@ -542,13 +543,70 @@ assert.equal(preChunks[0].reason.kind, 'aborted')
   assert.ok(/路径/.test(body) && /无图像输入/.test(body), '指引缺了"无图像/给路径"这两要素')
 
   const skippedWarns = []
-  const withBlock = formatOpenAiMessages(
-    { messages: [{ role: 'user', content: [{ type: 'text', text: '看这张' }, { type: 'image', attachment: { name: 'qr.png', attachmentId: 'sha256:abc' } }] }] },
+  const withBlock = await formatOpenAiMessages(
+    { messages: [{ role: 'user', content: [{ type: 'text', text: '看这张' }, { type: 'image', attachment: { name: 'qr.png', attachmentId: 'sha256:abc', mediaType: 'image/png' } }] }] },
     (m) => skippedWarns.push(m),
   )
+  // attachmentId 不是合法 64 位 hex → 读取失败 → 回落占位符并告警（温和失效，不再静默丢弃）
   assert.ok(withBlock[0].content.includes('看这张'), '文本部分被图片处理带丢了')
-  assert.ok(skippedWarns.some((w) => w.includes('image(qr.png') && w.includes('sha256:abc')), `告警没带可定位信息: ${skippedWarns.join(' | ')}`)
-  console.log('✅ 图片占位符换成行动指引；被跳过的 block 告警带出文件名/attachment id')
+  assert.ok(skippedWarns.some((w) => w.includes('qr.png') && w.includes('未能读取')), `回落告警缺失: ${skippedWarns.join(' | ')}`)
+  console.log('✅ 图片占位符换成行动指引；无法读取的图片回落占位符并带文件名告警')
+}
+
+// P0-A3③ 收官：内核 image block → 反代 image_url 的完整通路。
+// 用真实 PNG 字节验证内核文档化的存储布局（<DSH_HOME>/attachments/v1/objects/<前2位>/<sha256>）。
+{
+  const { createHash } = await import('node:crypto')
+  const { mkdtemp, mkdir, writeFile, rm } = await import('node:fs/promises')
+  const { tmpdir } = await import('node:os')
+  const { join } = await import('node:path')
+
+  // 1x1 红 PNG（与反代验证图同款最小 PNG 结构，带完整 magic bytes）
+  const pngBytes = Buffer.from(
+    '89504e470d0a1a0a0000000d494844520000000100000001080200000090775' +
+    '3de0000000c4944415408d763f8cfc00000030101' + '00c9fe92ef0000000049454e44ae426082', 'hex')
+  const digest = createHash('sha256').update(pngBytes).digest('hex')
+  const fakeHome = await mkdtemp(join(tmpdir(), 'dsh-att-'))
+  const v1Root = join(fakeHome, 'attachments', 'v1')
+  const objectDir = join(v1Root, 'objects', digest.slice(0, 2))
+  await mkdir(objectDir, { recursive: true })
+  await writeFile(join(objectDir, digest), pngBytes)
+
+  const { imageDataUrlPart, digestOf, objectPath } = await import('../lib/attachments.js')
+  assert.equal(digestOf('sha256:' + digest), digest, 'attachmentId 解析失败')
+  assert.equal(digestOf('../../etc/passwd'), null, '路径穿越必须被拒')
+  assert.equal(objectPath(v1Root, digest), join(objectDir, digest), '存储布局推导与内核文档不符')
+
+  const part = await imageDataUrlPart({
+    type: 'image',
+    attachment: { attachmentId: 'sha256:' + digest, mediaType: 'image/png', bytes: pngBytes.length, width: 1, height: 1 },
+  }, { root: v1Root })
+  assert.ok(part, '真实布局的对象没有被读到')
+  assert.equal(part.type, 'image_url')
+  assert.ok(part.image_url.url.startsWith('data:image/png;base64,'), 'data URL 形态不对')
+  assert.equal(Buffer.from(part.image_url.url.split(',')[1], 'base64').toString('hex'), pngBytes.toString('hex'), 'base64 往返后字节不一致')
+
+  // mediaType 与 magic 不符必须拒绝（第二道闸）
+  const wrongType = await imageDataUrlPart({
+    type: 'image',
+    attachment: { attachmentId: 'sha256:' + digest, mediaType: 'image/gif', bytes: pngBytes.length, width: 1, height: 1 },
+  }, { root: v1Root })
+  assert.equal(wrongType, null, 'PNG 内容被当成 GIF 放行了')
+
+  // formatOpenAiMessages 端到端：图片 block 变成数组形态的 content
+  const msgs = await formatOpenAiMessages({
+    messages: [{ role: 'user', content: [
+      { type: 'text', text: '这是什么颜色' },
+      { type: 'image', attachment: { attachmentId: 'sha256:' + digest, mediaType: 'image/png', bytes: pngBytes.length, width: 1, height: 1 } },
+    ] }],
+  }, undefined, { io: { root: v1Root } })
+  assert.ok(Array.isArray(msgs[0].content), '带图消息的 content 应该是数组')
+  assert.equal(msgs[0].content[0].type, 'text')
+  assert.equal(msgs[0].content[1].type, 'image_url')
+  assert.ok(msgs[0].content[1].image_url.url.includes(digest.slice(0, 8)) === false && msgs[0].content[1].image_url.url.startsWith('data:image/png'), 'data URL 异常')
+
+  await rm(fakeHome, { recursive: true, force: true })
+  console.log('✅ 内核 image block → 磁盘对象 → data URL → OpenAI image_url part 全链路（含 magic 校验与路径穿越拒绝）')
 }
 
 console.log('=== [7/18] 后端不可用时的错误口径 ===')
