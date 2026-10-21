@@ -99,7 +99,7 @@ cd C:\Users\Admin\DeepSeek_Harness\dsh-client-config\plugins\dsh-deepseek-web-ap
         # 需要指明时可以写 ~ 前缀：serverDir: '~/DeepSeek_Harness/git-repo/deepseek-web-api'
         autoStart: true
         startTimeoutMs: 60000
-        maxContextWindow: 128000
+        maxContextWindow: 576000      # 上游实测约 1M token；576000 是中文会话压缩线不越顶的最紧一档
         defaultMaxTokens: 32768     # 申报给 DSH 的单轮输出预留（上游不强制 max_tokens）
         toolDescriptionMaxChars: 0  # 0 = 工具描述完整下发；>0 才按字符预算裁剪
         toolReasoning: 'clean'   # 注入后端 DS_TOOL_REASONING：clean 才能实时流式深度思考
@@ -119,6 +119,16 @@ cd C:\Users\Admin\DeepSeek_Harness\dsh-client-config\plugins\dsh-deepseek-web-ap
 > `defaultMaxTokens` 不会真的限制输出：网页端上游不接受 token 上限（反代 `docs/api.md` 已说明），
 > 它只是告诉 DSH“单轮最多可能吐多少”，内核据此预留上下文水位。实测单轮可产出 6 万字符（约 2 万 token），
 > 所以默认值取 32768；写小了会让压缩/截断决策过于乐观。
+
+> `maxContextWindow` 申报的是**内核压缩线的输入**，不是模型能力。上游实测窗口约 1M token
+> （1,850,168 中文字符 = 957,921 token 仍完整召回，1,900,163 字符起静默空回合），但
+> `dsh-compaction-basic` 的触发式是 `threshold = min(0.8W, W − defaultMaxTokens − 65536)`，
+> 而它的 tokenMeter 按「4 字符 ≈ 1 token」估算——中文实际约 0.518 token/字，估算只有真实用量的一半。
+> 于是 576000 会在真实约 95.5 万 token 时压缩（贴着 95.8 万的实测上限，余量约 0.3%），
+> 512000 是留 11% 余量的保守档，640000 要到真实约 106 万才动手——先撞空回合，压缩永远来不及。
+> 中文会话算出来的安全上界是 577,900；旧的 128000 之所以像"上下文很小就被压掉"，是因为它的阈值只有
+> 29,696 估算 token ≈ 6.2 万真实 token。复算工具是运维目录里的 `~/DeepSeek_Harness/probes/kernel_threshold.mjs`
+> （它 eval 安装包里的公式原文，不重写公式；该目录未纳入版本管理）。
 
 > `toolReasoning` / `tools` / `streamContent` 只在插件**自己拉起**后端进程时生效；如果 8787 已经被别的进程占用，插件会直接复用（复用实例的环境变量由那次启动决定），此时用后端自述的 `streamContent` 与本地配置比对并 `logger.warn`。
 
