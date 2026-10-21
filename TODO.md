@@ -161,3 +161,13 @@
      所以失败文本连"否定它"都不能写。现在写 `unrelated to prompt size`，测试断言消息**不含** `/context\s+(length|window)/i`。
    - 验证：反代 20 个测试文件 / **166 用例**全绿（原 158 + 新增 8），`pnpm lint`（含 300 行与英文注释两道守卫）、`pnpm build`、`tsc --noEmit` 全通过；
      插件 18 段 smoke + config_check + prepareCall 回归全绿，新增两条断言（504 → 可重试 `SERVER`；错误帧文本不混进正文）。
+
+5. **上线与复验**：反代提交 `a409146`、插件 `632c06f` + `977ea0d`(hermetic) + `7c9c7f9`(告警去重)；
+   `install.ps1` 回写指针 `71db820 -> a409146` 并逐文件校验镜像一致；旧后端 13072 已按树回收，客户端重启后由新代码拉起 19076。
+   真实回合复验（`test/live_e2e.mjs`）：`/health` 8 条能力位、`mismatches=0`、`ms=10530 ttft=4708ms toolCalls=1 usage=0/672 outcome=tool-calls`、零告警。
+   插件 CI 全绿（structure ubuntu × smoke windows-latest，Node 20/22）。
+   **CI 抓到两个本机看不到的问题**（都值得记住）：① 新增用例没传 manager，于是 `current()` 去解析后端目录 —— 本机命中指针所以安静，
+   干净 runner 上多一条告警把"合法值不该告警"判失败；② 申报失败文本里写了"not a context length limit"，被插件的上下文超长措辞正则命中，
+   504 空回合被判成**不可重试**的 `CONTEXT_WINDOW_EXCEEDED` —— 否定一句诊断语也一样会触发正则。**仍缺的验证**：真实空回合样本（`emptyVerdict` 上线后还没有一条），
+   以及后端仓 GitHub Actions 对 `main` 的 push **没有触发任何 run**（`a409146`/`71db820`/`168c46e` 都查不到，属既有状态，非本轮引入）。
+
