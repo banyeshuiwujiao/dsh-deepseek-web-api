@@ -495,10 +495,13 @@ assert.equal(preChunks[0].reason.kind, 'aborted')
 // INVALID_MODEL_CONTEXT —— 那不只杀掉这一轮，连 read_image 这类要过模型路由校验的工具
 // 都会在几毫秒内死掉，看起来就像"这个模型不能看图"（真实事故：4 次读图全灭 + 5 小时绕圈）。
 {
+  // hermetic：给一个假 manager，不让 current() 去建真的后端管理器 —— 那会去解析后端目录，
+  // 在本机命中指针文件所以安静，在 CI 上解析不到就会多告警一条，把"合法值不该告警"判成失败。
+  const stubManager = { ensure: async () => HEALTH_OK, dispose: () => {}, serverDir: () => '', health: () => HEALTH_OK }
   const warned = []
   const stringCfg = new DeepSeekWebApiAdapter(
     { baseUrl: 'http://127.0.0.1:1', autoStart: false, maxContextWindow: '128000', defaultMaxTokens: '32768' },
-    null,
+    stubManager,
     { warn: (m) => warned.push(String(m)), info: () => {}, debug: () => {}, error: () => {} },
   )
   const coerced = await stringCfg.resolveModel(PROVIDER_ID, 'deepseek-web-thinking')
@@ -510,7 +513,7 @@ assert.equal(preChunks[0].reason.kind, 'aborted')
   const junkWarns = []
   const junkCfg = new DeepSeekWebApiAdapter(
     { baseUrl: 'http://127.0.0.1:1', autoStart: false, maxContextWindow: 'abc', defaultMaxTokens: 0 },
-    null,
+    stubManager,
     { warn: (m) => junkWarns.push(String(m)), info: () => {}, debug: () => {}, error: () => {} },
   )
   const fellBack = await junkCfg.resolveModel(PROVIDER_ID, 'deepseek-web-thinking')
