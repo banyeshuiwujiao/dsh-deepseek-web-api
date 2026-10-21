@@ -1,546 +1,133 @@
-# dsh-deepseek-web-api TODO —— 真机跑通之后的深度审计(0.1.0,证据见 `session-969ec5e0`)
+# dsh-deepseek-web-api TODO —— 第二次真机长时程复盘（证据：DSH 会话 `session-7f8ab623`）
 
-> 现状:DSML/文本协议双解析 + 泄漏兜底重试 + `toolReasoning`/`tools` 两个开关已落地,
-> 真机会话 `session-969ec5e0-85de-47ea-b01a-a0799cbacf37`(2026-10-20 18:38,13 步 / 13 次工具调用 / 169.5s)
-> **一次跑通、零重试、零协议泄漏**,`turn/end reason=completed`。
-> 本文件不是"待办清单",是**这次真机链路复盘后逐条对照代码审出来的缺口**:每条都带代码位置 + 实测证据 + 建议改法。
-> 总原则:**插件只做协议翻译与进程托管,解析/重试的权威留在反代后端**;插件侧兜底必须"可观测、可重试、不误伤"。
-
----
-
-## 0. 调用链路(真机复核版,改代码前先看)
-
-| 环节 | 位置 | 真机会话实测 |
-|---|---|---|
-| ① DSH 选模型 | `provider.js#prepareCall` → `resolveModel` | `provider=deepseek-web-api`,`model=deepseek-web-thinking`,`contextWindow=128000`,`defaultMaxTokens=8192` |
-| ② 确保后端存活 | `server.js#ensure` → `GET /health` | 复用了**已在跑的** PID 11192(`node dist/index.js start`),没有走 `spawnServer` |
-| ③ 组请求体 | `provider.js#formatOpenAiMessages` / `formatOpenAiTools` | system 17235 字符 + 52 个工具(schema 50553 字符)+ 历史(工具结果累计 57628 字符) |
-| ④ 发 SSE 请求 | `POST 127.0.0.1:8787/v1/chat/completions` | `model:'deepseek-chat'`、`stream:true`、`thinking_enabled:true`、`reasoning:{effort:'medium'}` |
-| ⑤ 后端鉴权/建提示词 | 反代 `authMiddleware` → `promptBuild.ts` | 注入 `[Tool compatibility]` 策略 + 完整工具定义;DSH 自己的 system 里**没有任何协议字样**(实测 grep DSML/tool_call 全为 -1) |
-| ⑥ 会话血缘复用 | 反代 `sessionStore.ts` / `sessionTurns.ts` | 按 tools/prompt 指纹复用网页会话,13 步里 11 步 2–11s 返回 |
-| ⑦ 上游取流 | 反代 `client.ts` → `iterDeepSeekUpdates` | 推理增量 22 段起于 +3940ms(实测探针) |
-| ⑧ 工具回合裁决 | 反代 `chatStream.ts#consumeToolChat` → `toolOutcome.ts` → `parseToolCalls`(DSML 优先) | 推理**实时**流出;正文缓冲到解析完成再一次性下发 |
-| ⑨ 下发结构化调用 | 反代 `emitToolChat` | 单个 chunk 内给出完整 `tool_calls`(带 `index`/`id`/`function.arguments`),`finish_reason='tool_calls'` |
-| ⑩ 插件映射为 DSH 块 | `provider.js#stream` | `reasoning-delta` / `text-delta` / `block-start`+`tool-call-delta`+`block-end` / `usage`(估算) / `finish` |
-| ⑪ DSH 执行工具 | 客户端 | `web_search`×3、`web_fetch`、`write`(38474 字符 HTML)、`read`×3、`camofox`×2、`pwsh`×3,参数**完整无损** |
-| ⑫ 收尾 | 客户端 | 第 13 步纯正文 1220 字符交付,`turn/end completed` |
-
-**已验证正确的部分**(不要重复劳动):DSML 与 JSON 文本协议双解析、大参数(`write` 38474 字符)完整落地、
-多步连续调用不串号、正文无协议残留、`PROTOCOL_LEAK` 兜底未被触发(说明解析已经稳)。
+> 上一份 TODO（P0-1…P3-5 共 34 条 + 各批落地记录）已全部闭环，正文被本轮替换；原文可查 `git show e4bc542:TODO.md`。
+> 落地记录里那些"为什么这么做"的论证仍然有效（能力契约为何不信版本号、托管/detach 的 EPIPE 语义、环境变量白名单、指针文件为何存在…），
+> 需要时按那条路径回读，不要在本文重复。本文只保留**结论指针**，正文换成这条链在真实任务里**新暴露**的缺口。
+> 口径不变：每条 = 代码位置 + 实测证据（seq/时间）+ 改法 + 验收；写作标准仍是"新机器上也能照着敲"。
+> 分工不变：插件只做协议翻译与进程托管，解析与重试的权威在反代后端。
+>
+> 那次任务是什么：用户让 DSH（跑在 **本插件 + `deepseek-web-thinking`** 上）克隆并接入 minimax 网页反代，
+> 中途要它把 MiniMax 的**微信扫码登录二维码**发给用户。00:46 起跑，跨 8 小时，turn 1–5 全程走本插件、500+ 次工具调用。
+> **它始终没能把那张图"看"懂一次**：反复"我再创一条设备码"（`seq 1905/1912/1919/1926`），4 次 `read_image` 全灭，
+> 最后在 09:12（本地）把模型选择器切到第三方（`magpie/auto/*`、`kilo/minimax/minimax-m3.1-flash:free`）才用 `present` 把二维码发出去。
+> 那 5 小时的绕行不是模型笨，是这条链在"图像"上是**死路，而且没人向模型交代这是死路**。这是本轮审计的主线。
 
 ---
 
-## P0 —— 会直接影响正确性/额度结算的缺口
+## 0. 本轮已闭环的（不要重复劳动）
 
-- [x] **P0-1 usage 全链路缺失,插件用错误口径估算顶替** —— 已修,见文末「P0 落地记录」
-  证据:实测探针里最终 chunk `usage=null`;反代 `chatCompletions.ts` 流式分支只写 `[DONE]`,
-  `chatStream.ts#finalChunk` 只带 `conversation`/`previous_response_id`,**从不带 usage**;
-  插件 `provider.js:384` 的 `if (chunkData?.usage)` 因此永远不成立,100% 走 `:404` 的兜底估算。
-  而兜底估算 `JSON.stringify(options.messages).length/3` 漏掉了 system(17235 字符)与 52 个工具 schema(50553 字符),
-  且中文按 /3 折算,单轮真实输入被低报数倍 —— DSH 的上下文水位与压缩决策全部建立在错数上。
-  改法:①插件请求体加 `stream_options:{include_usage:true}`;②反代把已经统计到的 `accumulated_token_usage`
-  (`updates.ts:75`)写进 `finalChunk.usage`;③插件加 `sawUsage` 标志,**只在没收到真实 usage 时**才发估算,
-  并把 system+tools 计入估算基数。
-
-- [x] **P0-2 工具 description 被砍成首行,`workflow` 丢了 81% 的说明** —— 已修,见文末「P0 落地记录」
-  证据:`provider.js:133` `String(t.description||'').split('\n')[0]`;真机 52 个工具共 13393 字符说明,
-  插件只保留 12043,**丢 1350 字符(10.1%),其中 `workflow` 1667 → 317**。
-  反代 `promptBuild.ts:196` 是把工具定义原样注入提示词的,所以这里砍掉的就是模型永远看不到的部分。
-  改法:默认不截断(反代已按指纹缓存,重复注入不额外花钱);若要控体积,改成"按总预算裁剪 + 记录被裁工具名 + 可配置",
-  并在 smoke 里断言 `workflow` 的多行说明完整透传。
-
-- [x] **P0-3 `defaultMaxTokens: 8192` 是个假承诺** —— 已修,见文末「P0 落地记录」
-  证据:插件请求体(`provider.js:225`)**不含 `max_tokens`**;反代全仓 `grep max_tokens` 零命中(只有 `models.ts` 解析 thinking)。
-  真机第 4 步一次吐出 38474 字符的 `write` 参数(远超 8192 token),说明上限既没传也没生效。
-  改法:二选一并写进文档 —— 要么插件透传 `options.maxTokens`、反代映射到上游;
-  要么 `resolveModel` 不再返回 `defaultMaxTokens`,避免 DSH 按 8192 规划截断/压缩。
-
-- [x] **P0-4 用户中止被上报成可重试的 TRANSPORT** —— 已修,见文末「P0 落地记录」
-  证据:`signal` 只传给了 `fetch`(`:247`),读流循环(`:287`)不检查 `signal.aborted`;
-  中止时 `reader.read()` 抛错落到 `:434` 的通用 catch,产出 `code:'TRANSPORT'` —— 而 `TRANSPORT` 在
-  `providerRetryPolicy.retryableCodes`(`:154`)里,`maxRetries:2`。用户点"停止"可能触发重试。
-  改法:catch 里先判 `signal?.aborted === true` → `kind:'aborted'`;并在 `finally` 里 `reader.cancel()`/`releaseLock()`
-  释放连接(现在 `PROTOCOL_LEAK` 提前 return 也会把 HTTP body 挂着)。
-
-- [x] **P0-5 所有非 2xx 都当 SERVER 重试,401/400 白烧两轮** —— 已修,见文末「P0 落地记录」
-  证据:`provider.js:261-272` 统一产出 `code:'SERVER'`(可重试)。API Key 轮换失效(401)、请求体非法(400)
-  都会被重试 2 次(1.5s→5s 退避),最后给用户一句无关痛痒的报错。
-  改法:按状态码分流 —— 401/403 → `AUTH`(不可重试,提示"检查 `data/.api-key`"),400/422 → `INVALID_REQUEST`(不可重试),
-  429 → `RATE_LIMIT`(可重试,退避拉长),5xx/502 → `SERVER`。反代的 `HttpError` 已带状态码,透传即可。
-
-- [x] **P0-6 `messages` 里的 system 角色会被静默丢弃(待确认 + 加固)** —— 已修,见文末「P0 落地记录」
-  证据:`formatOpenAiMessages`(`:95-121`)只处理 `user`/`assistant`/`tool` 三种 role,其余**直接跳过**;
-  真机日志里存在独立的 `system/message` 事件(seq 15,17235 字符)。目前无法从会话日志证明它走的是 `options.system`
-  还是 `messages[]` —— 一旦是后者,整段系统提示词不会到达模型,而插件不会有任何报错。
-  改法:`role==='system'` 时并入前导 system(或原样透传),并在 smoke 里加一条"messages 含 system 角色"的断言。
-  顺带:未知 role 至少要 `logger.warn`,不要静默吞。
-
-- [x] **P0-7 非文本 block 被静默压成空串,图片能力名不副实** —— 已修(告警口径),见文末「P0 落地记录」
-  证据:`textOf`(`:71-85`)只收 `type==='text'`;DSH 工具表里有 `read_image`,`listModels`/`resolveModel`
-  又只声明 `inputModalities:['text']`。图片内容会被丢掉且无提示。
-  改法:短期 —— 遇到 image/其他 block 时 `logger.warn` 并明确告知"网页反代不支持图片输入";
-  长期 —— 反代支持后再打通,并同步更新 `inputModalities`。
+| 事项 | 结论 |
+|---|---|
+| 指针 `gitRev` 过期永不回写 | 提交 `fb4f25f`：`lib/paths.js` 新增 `shouldRefreshPointer()` + install.ps1 pointer 分支回写 + smoke 断言；实测输出 `指针 gitRev 已过期，回写: … 168c46e -> 71db820` |
+| "超长提示词导致空返回"的错误定性 | 提交 `71db820`（新 capability `empty-stream-attribution`）：streamWatch 给 `upstream-not-started / upstream-silent / parser-dropped-content` |
+| 运行态换代 | 旧 detach 后端 `8544` 已按树回收，现 `13072`；`/health` = 8 条能力位含 `empty-stream-attribution`；真实回合 `ms=4433 ttft=1555ms reasonChars=174 toolCalls=1 usage=0/672 outcome=tool-calls`、零告警 |
+| 上一份 TODO | P0 全 8 条、P1-1…P1-8、P2-1…P2-8、P3-1…P3-5 已落地；**但 P0-7 的前提被本轮推翻，见 P0-A1** |
 
 ---
 
-## P1 —— 流式体验、健壮性与可观测性
+## P0-A —— 图像通路：本次事故的正身
 
-- [x] **P1-1 `tool_calls` 不按 `index` 累积,依赖"后端一次给全"的隐含假设** —— 已修,见「P1 落地记录」
-  证据:实测探针里后端在**单个 chunk**给出完整数组(带 `index:0`/`id`/完整 `arguments`),
-  插件 `:358-377` 于是逐个开块-发增量-关块。一旦后端改成 OpenAI 标准分片(同 `index` 多次追加 `arguments`),
-  插件会产出 N 个各自残缺的 tool-call 块;而 `:360` 的兜底 id `call_${Date.now().toString(36)}` 在同一毫秒内多调用会**撞号**。
-  改法:用 `Map<index, {id,name,args}>` 累积,在 `finish_reason` 或流结束时统一关块;兜底 id 加自增序号;
-  smoke 增加"分片 tool_calls"与"单 chunk 双调用"两个用例。
+- [ ] **P0-A1 图片在到达插件之前就被内核换成占位文本，所以 P0-7 的"丢弃告警"在真实链路上永不触发。**
+  内核取证（直读 `app.asar`，逐字）：`textOnlyImageText(ref)` →
+  `[image omitted because this model accepts text only; attachment sha256:xxxxxxxx]`。
+  插件侧的对应物是 `lib/openai.js:96-99` 的 `skipped` 分支（"消息中的 … 内容无法经网页反代转发，已丢弃（仅支持纯文本）"），
+  它只在 **raw image block 真的进了 messages** 时才可能触发。实测本会话 turn 1–5（跑在本插件上）**没有任何一条记录含 `image` block**，
+  模型反复读到的是那句占位符（`seq 1277`、`1292`）：它只知道"图被省略了"，**不知道图是什么、存在哪、能怎么办**。代价是 5 小时绕圈。
+  改法（纯插件侧，不动后端）：
+  ① `collectText()` 除返回 `skipped` 类型外，把 block 上的**可定位信息**（路径 / 文件名 / attachment id）一并带出；
+  ② `formatOpenAiMessages` 认出 `[image omitted …]` 时补一句稳定提示："本模型无图像输入；要让用户看到这张图就用 present 工具、或把**文件路径**写进正文；要图中内容就请用户用文字描述。"
+  这条提示有实据：本会话 `seq 1742` 截图工具本来就返回纯文本
+  `截图已保存：C:\…\camofox-screenshot-2026-10-21T01-04-01-487Z.png（要看图请用 read_image 读这个路径…）`
+  —— **路径一直在消息里**，缺的只是"没有视觉时该拿路径做什么"这一句。
+  验收：mock 一条含占位符的 tool 结果 → 断言插件送出的 prompt 同时含"无图像能力 / 路径 / 下一步"三要素；smoke 加用例。
 
-- [x] **P1-2 工具回合的正文仍然全量缓冲,长任务期间界面只有思考气泡** —— 窄版本已落地（默认仍 `buffered`，`streamContent: 'live'` 才开启）
-  证据:真机第 4 步耗时 **75602ms**(生成 38474 字符的 `write` 参数),期间 DSH 只能显示推理增量;
-  反代 `chatStream.ts#consumeToolChat` 是刻意缓冲正文以避免半截协议标记外泄。
+- [ ] **P0-A2 `context.contextWindow` 不做类型强制：一个字符串值会同时打断模型路由与图像工具。已本地复现。**
+  内核校验（逐字）：
+  `if (context !== void 0 && (!Number.isInteger(context.contextWindow) || context.contextWindow <= 0)) throw new LlmError('adapter returned invalid context metadata for provider "…" model "…"', 'INVALID_MODEL_CONTEXT')`
+  插件（`lib/provider.js:223`）：`context: { contextWindow: opts.maxContextWindow }` —— **原样透传，不 coerce**；
+  `_read()` 只做 `{ ...DEFAULTS, ...raw }`，`apply(ctx, config)`（`lib/provider.js:632-638`）把 cordis 配置对象当活源直接接进来。
+  复现（本轮实跑，用运行时镜像里同一份 `lib/provider.js`）：
+  ```
+  maxContextWindow: "128000"  →  context.contextWindow 类型 string → 内核判 INVALID_MODEL_CONTEXT
+  走 DEFAULTS（数值 128000）  →  number，正常
+  ```
+  会话里的形态完全吻合：4 次 `read_image` 全在**发起后 8ms 内**失败（`seq 1069→1070`、`1273→1274`、`1283→1284`、`1758`），
+  `isError:true`，正文 `Error: adapter returned invalid context metadata for provider "deepseek-web-api" model "deepseek-web-thinking"`，
+  `error.code = INVALID_MODEL_CONTEXT` —— 工具**根本没执行**，模型连"图片多大、什么格式"都拿不到，只能得出"我完全看不了图"。
+  为什么一直没被抓到：smoke 全用数值（`test/smoke.mjs:191` `assert.ok(resolved.context?.contextWindow > 0)`、`:1059`、`:1075`），
+  而 YAML / 控制台设置里写 `maxContextWindow: "128000"` 完全合法 —— `'128000' > 0` 同样为 true，现有断言拦不住。
+  改法：`resolveModel` 内统一 `Number(...)` + `Number.isInteger(x) && x > 0` 校验；非法就 `warn` 一条**可定位**告警并**回落 `DEFAULTS.maxContextWindow`**，
+  绝不让 `prepareCall` 把异常抛给内核（抛出去表现为 `INVALID_MODEL_CONTEXT`，用户只会以为"这个模型不能看图"）。
+  `defaultMaxTokens` 同样补正整数约束（现在只有 `Number.isFinite`）。
+  验收：smoke 两条（字符串配置 → 必须得到正整数；无法解析 → 必须回落并留告警）；
+  `docs/troubleshooting.md` 症状表加一行："`read_image`/`prepareCall` 秒失败 + `INVALID_MODEL_CONTEXT` = 申报值类型不对，不是模型不支持图"。
 
-  做法（"只在一处论证、只有一处实现"这条守住了）：
-  - 正文通道复用同一个 `ProtocolTextGate`，插件侧不重写"什么看起来像标记"；闸门语义仍是**只扣不回**。
-  - 顺手补了闸门与解析器的**词表分歧**（真 bug）：`collectJsonObjects` 认行首裸 `{"function":{…}}`，
-    而闸门只认 `name`/`arguments` —— 那条正文会被当散文先发给用户。现在 `TOOL_JSON_KEY` 含 `function`，
-    `TOOL_JSON_PARTIAL` 改成"`{` + 任意未完成小写键（带或不带收尾引号）一律扣住"，
-    钉住 `{"name"` 这个切点（旧写法在此处会放行半截对象）。
-  - 解析完只补发"客户端还没见过的尾巴"：`remainderOf(streamedContent, parsed.content)`；
-    前缀对不上就**什么都不补**（宁可少发，也不在屏幕上叠两段答案）。
-  - live 只作用在**第一次尝试**：被判无效而重试的那轮，重来的答案不追加（SSE 已上屏的字收不回来，
-    这是这个开关唯一的已知失真，`docs/troubleshooting.md` 写了怎么退回 `buffered`）。
-  - 后端 `/health` 新增 `streamContent` 自述 + `live-tool-content` 能力位；插件比对不一致只告警。
-
-  验证：反代 146 单测（含"分片裸对象不外泄""补发只发尾巴""被替换的判决不追加"）+ lint + build；
-  插件 `node --check` / `config_check` / smoke `[9/18]` `[13/18]` 两条新断言；真机 live 模式跑通渐进正文。
-
-- [x] **P1-3 泄漏检测发生在流末尾,脏文本已经给用户看过了** —— 做了两件低风险的事；**闸门本身不单独做，与 P1-2 合并**
-  原判读需要更正一处：内核每轮是一个 `AssistantStreamAttempt`，增量只以 `animation-frame` 瞬时渲染，
-  持久记录是收尾 settle 出的 `assistant/message`；错误路径上是 `if (!live.ended) live.abandon()`。
-  也就是**失败尝试的内容不落盘**，所以真实代价只是"重试窗口里闪一下脏文本"，不是"转录里留下双份内容"。
-  收益降级后，前面加闸门的代价就显得不划算：那要在插件里再实现一遍"什么看起来像协议开头"，
-  等于把"权威解析只有一处"这条不变量拆成两处；两处不一致的症状是**把反代判定为合法正文的内容憋住不发**，
-  比闪一下糟得多，也更难诊断。
-
-  本轮已落地的两条（都不动流式路径）：
-  - **收窄判定**：只有"本轮确实带了工具"时才做泄漏判定。不带工具的回合（如会话标题请求）里出现
-    `<calls>` / `<parameter value=1>` 属合法内容——用户完全可能让模型讲解协议或写这类代码，
-    原先的写法会白烧两轮重试并把正常答案藏掉。smoke `[6/18]` 两个方向都钉住了。
-  - **可诊断**：反代最终 chunk 现在带 `diagnostics`（`protocolShape`/`protocolTruncated`/字符数/调用数），
-    插件把它并入每轮那行 debug（`protocolShape=json protocolTruncated=true`），旧后端没有该字段时显式写
-    `unknown` 而不是留空；`PROTOCOL_LEAK` 报错文本也带上泄漏通道与后端判定，真出现第三种协议形态时一行日志可定位。
-
-  仍要做的（并入 P1-2，一起决策）：正文与推理共用反代 `ProtocolTextGate` 做增量放行，
-  那时"半截标记永不外泄"只在一处论证、只有一处实现，收益也才真正变大（正文能边生成边显示）。
-  残留已知面：带工具的回合里，模型若把协议标记作为**引用内容**写在正文中（例如让它解释这段格式怎么读），
-  仍会被判泄漏并重试。这是"宁可报错也不静默放过"的取舍，改前者的前提是后端能区分引用与执行。
-
-
-- [x] **P1-4 每一步都 `/health` 探活,且没有请求级超时** —— 已修,见「P1 落地记录」
-  证据:`:211` 每次 `stream()` 都 `await this.manager.ensure()`(内含 3s 超时探针),真机 13 步 = 13 次探活;
-  同时 fetch 只受 DSH 的 signal 约束,上游卡死就会永久挂着(反代侧也没有 inactivity timeout)。
-  改法:健康状态缓存 30s(或仅在传输失败后重新探活);加"连续 N 秒无字节 → `TIMEOUT`(可重试)"与总时长上限。
-
-- [x] **P1-5 错误路径不关闭已打开的 block** —— 顺手已修(见「P0 落地记录」第 9 条),索引收敛仍待做
-  证据:`PROTOCOL_LEAK` 提前 return(`:427`)与 catch 分支(`:436`)都没有补 `block-end`;
-  收尾处的 `block-end`(`:399`)复用 `blockIndex` 但不自增,后续再开块会与它撞索引。
-  改法:`try/finally` 统一收口;索引分配收敛成一个 `nextIndex()`。
-
-- [x] **P1-6 `/health` 太哑:插件无法确认"在跑的是哪一套后端、哪一套配置"** —— 已修,见「P1 落地记录」
-  证据:实测 `GET /health` 只返回 `{"ok":true}`。本次真机会话用的后端是**我手工起的** PID 11192
-  (父进程是 shell,不是 DSH),因此插件 `spawnServer` 注入的 `DS_TOOL_REASONING`/`DS_TOOLS`(`server.js:72-74`)
-  **在真机链路上从未被执行过**;会话日志也无法证明当时跑的是 clean 还是 hidden
-  (反代默认是 `hidden`,见 `config/env.ts:61`),我只能靠探针数推理增量段数才反推出来是 clean。
-  改法:反代 `/health` 返回 `{ok,version,toolReasoning,toolCalls,upstreamOk,sessionAge}`;
-  插件 `ensure()` 比对自己的配置,不一致就 `logger.warn`(或 `strictBackend:true` 时拒绝复用、改为重启),
-  并把后端 version 与 `minBackendVersion` 对照(见 P3-3)。
-
-- [x] **P1-7 插件侧几乎零日志,反代已经算好的诊断没被用上** —— 已修,见「P1 落地记录」
-  证据:`ctx.logger` 只在 spawn 时用了一次(`server.js:109/122`);每轮的 ttft、chunk 数、finish_reason、
-  是否重试、协议形态全都没有落日志。反代其实已经算了 `protocolShape`/`protocolTruncated`
-  并在最终 chunk 带了 `conversation`(实测 `conv=4a9cdaf8-…`),插件一律忽略。
-  改法:反代把诊断塞进最终 chunk;插件每轮 `logger.debug` 一行
-  (`ttft/chunks/reasonChars/contentChars/toolCalls/protocolShape/finish/conversation`),
-  并像 `tail()` 一样保留环形缓冲,便于"跑完就能复盘"。当初那个 bug 要是有这行日志,一眼就能定位。
-
-- [x] **P1-8 后端日志只在内存里,崩溃现场拿不到** —— 已修(可选 `logFile`),见「P1 落地记录」
-  证据:`server.js:53-57` 的 `recentLogs` 上限 50 行、只存内存,`tail()` 仅拼进启动失败的错误串;
-  插件没有对外暴露任何诊断入口。
-  改法:可选 `logFile` 配置(默认写到插件目录下 `logs/backend.log`,轮转),并把 `tail()` 通过一个诊断命令/工具暴露出来。
+- [ ] **P0-A3 `inputModalities: ['text']` 申报是对的，但它换来的是"图片消失"，不是"图片可替代"。**
+  现状：`lib/provider.js:209`（`listModels`）与 `:222`（`resolveModel`）都申报 `['text']`。
+  内核另一处（逐字）：`if (info.inputModalities === void 0 || !info.inputModalities.includes("image")) throw new AcpContentError('model "…" does not declare image input','invalid')`
+  —— **假装支持图像只会把失败换一个错误码**，不能治本。要补的是替代路径，按成本三档，**先做 ①②**：
+  ① **无视觉也能把图交付**：真正救场的是 `present` 把 `minimax-wechat-qr.png` 发给用户（`seq 2059`、`2064`）。
+     这不需要图像能力 —— 在 `KNOWN_MODELS`（`lib/provider.js:39-56`）的 `description` 里写清"无图像输入；要给用户看文件请用 present / 给出路径"，
+     让模型**第一轮就想到**，而不是先绕 5 小时。
+  ② **本地把图变文字（专治二维码）**：二维码里唯一有用的信息就是一段文本。给一条可选的本地解码路径（zxing / pyzbar，走后端已有的 Python 环境；
+     **插件保持零依赖**，别把解码库塞进 `package.json`，CI 的零依赖断言会红）。本会话直到 `seq 2292` 才把设备码链接当文字念出来
+     （`…/oauth-authorize?user_code=HU7R-PFV4`），而从页面 DOM 直接取这个 URL 早就能成 —— **"扫码"这件事本来可以完全不经过视觉**。
+  ③ **真给上游喂图（工作量大，本轮只要求给可行性结论）**：反代 `src/deepseek/completion.ts:44` 发的是 `"ref_file_ids": []` —— 硬编码空数组，
+     而网页版聊天本身支持附件。要做先探清 `chat.deepseek.com` 的上传接口与 file 对象结构（红线：只读探测、凭据不落日志、不新增远端），
+     再决定支持与否；落地就把能力位加进 `/health` 并同步 `inputModalities`。
+  验收：①②进 README/docs 并有可执行示例；③要么留"上游不支持 / 需要 X 步"的明确结论，要么实现并有一次真实回合。
 
 ---
 
-## P2 —— 进程生命周期、安全与可移植性
+## P0-B —— 空回合归因的后续（上一轮的尾巴，别再靠猜）
 
-- [x] **P2-1 `dispose()` 只杀直接子进程,headless Chrome 变孤儿** —— 已修,见「P2 落地记录」
-  原证据:Chrome PID 13136(监听 CDP 9333)的 `ParentProcessId=19508`,而 19508 是**早已被杀掉的旧后端**;
-  它至今存活,新后端靠 `data/chrome.cdp` 复用它。`child.kill()` 在 Windows 上不成树。
-
-- [x] **P2-8(新发现)托管 stdio 让后端被拉起者的退出以 EPIPE 方式牵连杀死** —— 已修(改成显式 `detach`),见「P2 落地记录」
-  原证据:`live_e2e.mjs` 跑完退出后,8787 直接 connection refused——后端不是因为"宿主 dispose"优雅收的,
-  而是因为父进程没了、stdout 管道断裂、写日志时 EPIPE 未捕获而自杀。行为"碰巧对",但既不可控也难诊断,
-  一次性脚本会被误伤。
-
-- [x] **P2-2 spawn 继承整个 `process.env`** —— 已修(白名单),见「P2 落地记录」第 5 条
-- [x] **P2-3 API Key 每请求同步读盘,缺失时静默** —— 已修(mtime 缓存 + 一次性可操作告警),见「P2 落地记录」第 6 条
-
-- [x] **P2-4 到处硬编码 `C:\Users\Admin\...`,换机器即废** —— 已改为解析层 + 指针文件,见「契约落地记录」
-  证据:`provider.js:40` DEFAULTS.serverDir、`cordis.patch.yml:18`、`install.ps1` 里的 `$backendDir` 全是绝对路径。
-  改法:支持环境变量(如 `DSH_DEEPSEEK_WEB_API_DIR`)/相对仓库根解析 + 常见位置探测,失败时给可操作报错;
-  文档里把"必须改这三处"写清楚。
-
-- [x] **P2-5 插件目录自带嵌套 `.git`,外层 `dsh-client-config` 无法追踪其文件** —— **这是有意设计，不要"修"**
-  用户 2026-10-20 明确：本插件故意做成独立仓（`banyeshuiwujiao/dsh-deepseek-web-api`），与配置仓分开提交，
-  避免被 `git add -A` 一并卷进 `dsh-client-config` 的提交。所以：**不删嵌套 `.git`，不折进外层仓，不做 submodule。**
-  配套已落定（外层提交 `0fd2771`）：`.gitignore` 的「嵌套的独立 git 仓库」段补上 `plugins/dsh-deepseek-web-api/`，
-  并 `git rm --cached` 掉 4f22dad 时代误跟踪的 `package.json`（文件留在磁盘，本仓从 `fdba50d` 起一直跟踪它）。
-  留下的规矩：以后本插件目录整体只在本仓提交；外层仓只提交 `profiles/**`；新独立的插件仓都要在同一段 .gitignore 里登记，
-  别再出现"半跟踪"状态。任何后续 agent 看到外层 `?? plugins/dsh-deepseek-web-api/...` 属正常，不是待办。
-
-- [x] **P2-6 配置快照一次性,改了要重启客户端** —— 已改为按调用活读 + 分代绑定,见文末「P2-6 落地记录」
-  证据:`apply(ctx, config)`(`provider.js:445-450`)在加载时合并一次 config;
-  `registerConfigurableProviders` 声明了 `settingsPath:['providers','deepseek-web-api']`,但没有订阅变更。
-  改法:监听配置变更 → 重建 manager/adapter(注意别把正在跑的请求打断),或至少在文档里写明"改配置需重启"。
-
-- [x] **P2-7 模型能力表与 thinking 判定各自为政** —— `resolveThinkingEnabled()` 已改为查 `KNOWN_MODELS.thinking`，只有未知模型才回退名字匹配；smoke 断言 flash/thinking/reasoner 三种判定。`effort` 档位仍只是布尔（反代只认开关），未动。
-  证据:`KNOWN_MODELS` 已经有 `thinking` 字段,但 `:219-221` 用的是
-  `model.includes('pro') || model.includes('reasoner')` 这种字符串猜测;
-  另外 `reasoning:{effort:'medium'}` 在反代侧只被当作真假开关(`models.ts:33-35` 仅判 none/off/0/false/disabled),
-  "medium" 这个档位并不存在。
-  改法:`isThinking` 从 `KNOWN_MODELS` 查表,未知模型给出显式策略(默认关思考 + warn);
-  去掉误导性的 effort 档位,或推动反代真正支持档位。
+- [ ] **P0-B1 等一次真实空回合样本，按 `emptyVerdict` 分流错误码。**
+  归因已上线（`71db820`），但**新字段至今零样本**：`~/.dsh/logs/deepseek-web-api.log` 里还没有任何 `emptyVerdict` 行（最近一轮是 01:12 的成功 `tool-calls`）。
+  务必别再写反的定性：15:18–15:36 UTC 的 `promptChars=301902 / 305013` **成功**（retry 1 后 `protocolShape:dsml` 恢复），
+  15:43:40–15:49:14 UTC 窗口内 `634 / 4695 / 28213 / 79634 / 125238 / 257158 / 332109` **全空**
+  —— 提示词大小不是分类器，那是一段窗口里上游整体不应答（本轮复核日志时先用宽泛关键词统计出"88 处失败"，也是同类错误，见文末附 2）。
+  分流口径：`upstream-not-started` / `upstream-silent` → 可重试（`SERVER`/`TIMEOUT`），文案写"上游未响应"；
+  `parser-dropped-content` → 修我们的正常化；只有真拿到上游超限措辞才 `CONTEXT_WINDOW_EXCEEDED`
+  （该码在 `lib/provider.js:196` 的 `retryableCodes` 里**故意不可重试**，用错会让人去砍对话历史）。
+- [ ] **P0-B2 `EMPTY_TOOL_RESPONSE_TEXT` 仍在伪装成正常正文。**
+  `src/deepseek/toolOutcome.ts:5` + `src/deepseek/client.ts:81/111`：判空后把兜底串当 `content` 下发，DSH 于是看到"有正文的一轮"，
+  用户读到 `DeepSeek Web did not produce a usable tool call or final answer after one automatic retry.`，
+  而插件 `lib/provider.js:577-584` 的 `EMPTY_RESPONSE` 分支永远走不到。
+  改法：判空轮次**不带正文**，改抛 `HttpError(504, 归因文案)`；并且**流内错误要带 `error.status`** ——
+  `src/api/chatCompletions.ts:65-68` 现在只写 `{error:{message}}`，插件 `lib/provider.js:453-459` 拿不到 ≥400 的 status 就判成 `TRANSPORT`。
+  验收：重放一次空上游（可用 P1-4 的 mock 后端），界面出现带原因的错误码而不是正文，日志错误码与 `emptyVerdict` 一致。
 
 ---
 
-## P3 —— 测试、CI 与版本文档
+## P1 —— 本轮实测暴露的健壮性/运维缺口
 
-- [x] **P3-1 smoke 覆盖面不够** —— 已扩到 9 段：分片 tool_calls 合成、单块双调用与 id 兜底、abort→ABORTED、401/429/502 码分流与 Retry-After、真实 usage 只发一块、无 usage 时的估算口径、system/developer 透传与未知角色告警、多行描述完整上线、归因头确实带出、错误路径 block 闭合、探活 TTL、diffHealth。
-  仍缺：泄漏闸门行为（等 P1-3 一起做）、`logFile` 轮转（目前只在 live_e2e 真机侧验过）。
-  现状:`test/smoke.mjs` 已扩到 15 段，上面列的"待补"全部有断言（分片累积 `[8/15]`、abort `[6/15]`、
-  401/429/502 与 Retry-After `[6/15]`、usage 单块与估算口径 `[5/15]`、system/developer 透传 `[1/15]`、
-  多行描述完整上线 `[1/15]`+`[5/15]`、错误路径补 `block-end` `[6/15]`、探活 TTL `[9/15]`、
-  进程树与 detach `[11/15]``[12/15]`、环境白名单 `[13/15]`、密钥缓存 `[14/15]`、配置守卫 `[15/15]`）。
-
-- [x] **P3-2 没有 CI** —— 已加 `.github/workflows/ci.yml`（见「P3 落地记录」）
-  证据:仓库无 `.github/`;`package.json` 的 `test` 只跑 smoke,`preparecall_regression.mjs` 需要真实 DSH 运行时(CI 跑不了)。
-  实际做法:`structure`(ubuntu,Node 20/22) 跑语法检查 + 零依赖断言 + `config_check`;
-  `smoke`(**windows-latest**,Node 20/22) 跑完整 15 段。smoke 钉在 Windows 是刻意的——
-  `[11/15]` 依赖 `taskkill /T`、`[12/15]` 验证托管/detach 的父子进程语义，Linux 上跑"绿"是自欺。
-  `preparecall_regression` / `live_e2e` 保留本地，CI 只检查这两个文件没被误删，并在 README 写明分工。
-
-- [x] **P3-3 插件与后端的版本契约没有锁** —— 已锁成能力契约,见「契约落地记录」
-  证据:插件 0.1.0 的正确性依赖反代未发布的那批提交(`25c39de`…`e117a84`:DSML 解析、`DS_TOOLS`、截断重试、推理流式)。
-  跑一个旧 `dist` 会**静默退回到最初那个 bug**(协议文本当正文、回合判为 completed)。
-  现状:P1-6 之后 `/health` 会自述 version 与开关，旧构建(不自述)已被 `diffHealth` 判为 stale 并告警——**能发现，但不会拦**;
-  P3-4 之后 `install.ps1` 会打印后端 git 版本并检查 dist 是否落后于 src——**手工可查，机器不拦**。
-  待做:把"必须满足的能力下界"写成断言(例如 `/health` 缺 `toolCalls` 字段即拒绝复用而不是只 warn)，
-  或给反代发一个真正的版本号(现在恒为 0.1.0，分辨不出新旧)。
-
-- [x] **P3-4 `install.ps1` 校验太弱** —— 已加固（见「P3 落地记录」）
-  原证据:只判断 `dist/index.js` **是否存在**(过期 dist 也算通过),只复制文件,不比对内容、不提示后端 git 版本。
-  已做:①第一步先跑 `config_check`；②dist 与 `src/**/*.ts` 最新 mtime 比对，落后就明确警告"旧 dist 会让新协议能力静默失效";
-  ③打印后端 `git rev-parse --short HEAD`;④同步后**逐文件 SHA256 校验**源与运行时镜像，
-  漏复制/半复制（例如新加 `lib/process.js` 没同步）当场 throw。
-  实测输出:`构建就绪且不落后于源码` + `后端 git 版本: 696f361` + `已同步并校验一致`。
-
-- [x] **P3-5 文档要补的三件事** —— 已写 `docs/protocols.md` 与 `docs/troubleshooting.md`，见文末「P3-5 落地记录」
-  ① 双协议设计(反代文档化文本协议 vs 网页原生 DSML)与"为什么正文在工具回合要缓冲";
-  ② `PROTOCOL_LEAK` 兜底的触发条件与用户可见表现;
-  ③ 本次真机会话里两个**不是本插件问题**的失败要写进 troubleshooting,避免误判归因:
-  `camofox POST /tabs HTTP 500 (browserType.launch ENOENT)` 与 `HTTP 400 Blocked URL scheme: file:`。
+- [ ] **P1-1 复用 8787 之前不校验"是不是我要的这一代"。** 今天真实发生：改后端 + `pnpm build` 之后只重启客户端，
+  新客户端仍复用旧 PID `8544`（`/health` 只有 7 条能力），因为新增 capability **没进 `REQUIRED_CAPABILITIES`** 就不参与契约。
+  这正是 P3-3 落地记录里写下的"能发现但不拦"的缺口在现实里咬人。
+  改法：把"本轮必须存在"的能力加进契约（或用 `requiredCapabilities` 在 profile 里点名）；
+  否则"版本号会骗人、能力位不会"这条经验只在你手动查 `/health` 时才成立。
+- [ ] **P1-2 9333 上的 Chrome 已定性为上一代孤儿**（实测，非推测；上一份 TODO 的 P2-1 只把"父进程 19508 已死"当背景事实记下，没形成检查）：
+  后端 `13072` 的子进程里没有它，它的父进程 `19508` 已不存在，而它的 `--user-data-dir` 正是本仓 `data/chrome-profile`。
+  dispose 走进程树回收 → 树上没有它 → 永远带不走，而启动日志照旧"已连接 Chrome CDP"照单复用。
+  改法：连 CDP 前比对 `--user-data-dir` 是否等于自己的 profile；不等则自起一个，并让 `/health` 报 `cdp: reused-foreign | owned`。
+  注意与 P2-2"不杀不是自己起的 Chrome"的既有取舍并存：那是**登录态**，别顺手 kill。
+- [ ] **P1-3 会话被截断时本地没有任何证据。** `session-7f8ab623` 最后一条是 `tool/call`（`job/registered=78` vs `settled=77`），
+  既无 `tool/result` 也无 `turn/end`，插件日志对应时段也没有错误行 —— 现场只能靠猜。
+  改法：`stream` 的抛错/中止路径保证**至少一行**含 `conversation` + `outcome` 的日志落盘；`docs/troubleshooting.md` 补"会话被截断怎么取证"。
+- [ ] **P1-4 把 streamWatch 字段写进文档，并让 Responses 路径同样暴露。** `src/deepseek/mapResponses.ts` 已带 `emptyVerdict/streamEvidence`，
+  但 `docs/api.md` 与 README 特性清单还没描述；真实空回合样本一到，日志口径要能查表而不是现场猜字段含义。
 
 ---
 
-## 附:契约与可移植性落地记录(P2-4 + P3-3)
+## 附：取证方法（下次排障直接抄）
 
-### P2-4 路径解析层（`lib/paths.js`）
-
-原先绝对路径出现在**四处**（比原估的三处多一处 `test/live_e2e.mjs`）：`DEFAULTS.serverDir`、
-插件样板 yml、`install.ps1`、真机脚本。现在统一走 `resolveServerDir`：
-
-配置 `serverDir` → 环境变量 `DSH_DEEPSEEK_WEB_API_DIR` → 指针文件 `~/.dsh/deepseek-web-api.json`
-→ 插件同级（源码形态 `../../../git-repo/deepseek-web-api`）→ home 下六个常见位置。
-
-三个刻意的设计：
-- **过期配置不一票否决**：写了 `serverDir` 但那个目录没有 `dist/index.js` 时，记录进 `notes` 并继续往下找。
-  换机器忘记改配置是常态，让它直接失败等于把可移植性锁回"必须手改这一处"。
-- **指针文件由 `install.ps1` 固化**（含 `gitRev` 与 `updatedAt`）：首次靠 env/同级/发现定位成功后立刻写回，
-  之后不再依赖猜测顺序，而且能回答"这个位置是谁、什么时候、按什么来源定的"。
-  实测写入：`{"serverDir":"...git-repo\\deepseek-web-api","gitRev":"7b1eacf","updatedAt":"2026-10-20T13:30:10Z"}`，
-  install 输出 `后端目录 = …（来源 discover）` → `指针已写入: ~/.dsh/deepseek-web-api.json`。
-- **`~` 前缀**：`logFile: '~/.dsh/logs/deepseek-web-api.log'` 在插件与样板 yml、desktop profile 里都改用 `~`，
-  desktop profile 里那条 `C:\Users\Admin\...` 已消失。
-- 全都没有时抛的错**交代找过哪些位置**并给出下一步（`pnpm build` / 环境变量 / `-BackendDir`）。
-- `install.ps1` 新增 `-BackendDir` 参数：显式指定时先校验再写指针；不传就走解析。
-
-### P3-3 能力契约（`lib/contract.js` + 反代 `capabilities`）
-
-**为什么最终选了能力清单而不是版本号**——真机抓到一个决定性反例：把契约写完之后去探正在跑的 8787，
-它自述 `{"version":"0.2.0", 没有 capabilities}`。那个进程是**加 capabilities 之前**构建的旧 dist，
-但 `version` 是每次 `/health` **现读 `package.json`** 的，所以旧代码也报了新版本号。
-按版本号判断会直接放行——这正是"看起来正常但能力静默失效"的形态。
-
-- 反代侧：`/health` 增加 `capabilities`（`dsml-tool-calls`、`protocol-switches`、`truncated-retry`、
-  `live-reasoning`、`include-usage`、`health-self-description`），版本升到 `0.2.0`，
-  CHANGELOG 把 Unreleased 落成正式条目（反代提交 `7b1eacf`）。
-- 插件侧：`checkContract()` 默认要求四项能力，`strictBackend`（默认 true）不满足就
-  `throw` 带 `failureCode:'BACKEND_STALE'`，映射成**不可重试**的 finish 错误（重试只会在同一个旧后端上再撞一次），
-  报错文本直接写"在哪跑 `pnpm build`"和降级办法；`strictBackend:false` 降级为逐条告警。
-  `requiredCapabilities` / `minBackendVersion` 可覆盖内置清单；版本比较只在能力清单本身可信时参与。
-- 测试：smoke `[17/17]` 除了纯函数断言，还**真起一个 mock `/health`** 验证三条路径——
-  旧后端被拒（`BACKEND_STALE`）、`strictBackend:false` 放行、合规后端通过。
-- 真机闭环：旧进程拒绝复用 → 树回收 → 新 dist 起来自述 `capabilities=6`、`mismatches=0`，
-  随后一轮真实工具回合 `usage 0/672`、`pwsh` 参数完整、`finish=tool-calls`、日志 13 行。
-
-### 顺带补的守卫（CI 里跑）
-
-`test/config_check.mjs` 增加 `checkSampleHygiene()`：样板里出现**本机绝对路径**
-（`C:\Users\...`、`/home/me/...`）或把 `serverDir`/`apiKey`/`nodePath` 写成生效配置，直接判红；
-注释里的示例放行。smoke `[15/17]` 用七个正反用例钉住它，其中包括"把注释里的 `serverDir` 变成生效配置必须被抓"。
-`REQUIRED_KEYS` 相应去掉 `serverDir`、补上 `strictBackend`/`requiredCapabilities`/`minBackendVersion`。
-
-**剩下的**：P1-2/P1-3 的正文闸门（当时决定保留，后按窄版本落地，见上文 P1-2 落地记录）。
-
-
-## 附:P3 落地记录(CI 与安装校验批次)
-
-1. **CI（P3-2）**：`.github/workflows/ci.yml`，push/PR/手动三种触发，`permissions: contents: read`（最小权限）。
-   - `structure`（ubuntu × Node 20/22）：逐个 `node --check`、**零依赖断言**（插件一旦被人加上依赖，
-     这条会红并提醒复核离线装配——运行时镜像是从 `~/.dsh/profiles/desktop/node_modules` 解析的）、`config_check`。
-   - `smoke`（windows-latest × Node 20/22）：完整 15 段。
-   - 两个本地专用测试**故意不进 CI**（要真实 DSH 运行时 / 要已登录的网页会话并真实调用上游），
-     CI 只 `test -f` 确认没被误删，并在 README 写清分工。
-   - 为什么 smoke 不跑 Linux：`[11/15]` 依赖 `taskkill /T`；`[12/15]` 验的是"托管 stdio 管道断裂会把子进程
-     EPIPE 带走 / detach 独立存活"。POSIX 分支的退路只杀单进程，孙进程会活下来——在 Linux 上跑绿是假信号。
-2. **配置守卫（新增，由本轮事故倒逼出来的）**：`test/config_check.mjs` 不依赖任何 YAML 库，检查
-   缩进（禁 Tab、必须偶数宽）、`- insert:` 入口、provider id 与模块名、15 个必需键、
-   `toolReasoning`/`tools` 枚举取值、以及 **baseUrl 必须只绑回环**（反代携带网页登录态，绑到 `0.0.0.0`
-   等于把账号交出去）。键的定位按 `config:` 自身缩进推下一级，不写死空格数——第一版就是写死 6 空格，
-   而样板实际 8 空格，把真文件判成"缺 15 个键"。
-   守门员自己也有人守：`smoke [15/15]` 用正例 + 五类反例（Tab、缺键、缺入口、公网绑定、非法枚举）钉住它。
-   附带一个真 bug：入口判定原本手拼 `file://` 比较，Windows 盘符路径比不上 → `main()` 静默不执行，
-   脚本"退出码 0 但什么都没测"。现在走 `pathToFileURL`，并被 smoke 间接覆盖。
-3. **install.ps1（P3-4）**：从 4 步变 5 步——先 `config_check`；dist 与 `src/**/*.ts` 最新 mtime 比对，
-   落后就警告（过期 dist 会让 DSML 解析/include_usage 这些能力静默失效，真机上吃过）；打印后端
-   `git rev-parse --short HEAD`；同步后**逐文件 SHA256 校验**源与运行时镜像，漏复制当场 throw。
-   实测：`构建就绪且不落后于源码` / `后端 git 版本: 696f361` / `已同步并校验一致`。
-4. **package.json**：`npm test` = 配置自检 + smoke（与 CI 完全同一套）；另拆出 `test:config` /
-   `test:smoke` / `test:runtime` / `test:live`，本地专用那两个名字里就写着要什么前提。
-
-**P3 剩下的**：P3-3（契约"能发现但不拦"，需要一个真版本号或 `/health` 字段缺失即拒绝复用）、
-P3-5（文档三件事）。
-
-
-
-## 附:P2 落地记录(进程生命周期批次)
-
-新增 `lib/process.js`（把"怎么起、怎么收"从 server.js 里拆出来，便于单测），`lib/server.js` 负责按配置选用。
-
-1. **进程树回收**：`killProcessTree(pid)` 在 Windows 走 `taskkill /PID <pid> /T /F`，POSIX 先打进程组
-   `-pid`，拿不到进程组时退化成单进程信号（不比旧行为差）；`isAlive()` 用 `signal 0` 探测，`EPERM` 算活着。
-   `dispose()` 默认 `killTreeOnDispose: true` → 后端起的 headless Chrome 一起收，不再留占 CDP 端口的孤儿。
-   幂等：目标已自行退出时按成功处理（`taskkill` 的"没有这样的进程"不报错）。
-   测试 `[11/12]` 用真进程复现"父起孙"的形状（后端 → Chrome 就是这个形状），断言两代都消失；
-   并断言无效 PID/已退出 PID 不抛。
-2. **两种显式语义，取代"靠 EPIPE 碰巧对"**：
-   - 托管（默认）：`stdio: ['ignore','pipe','pipe']`，插件能 tail 与落盘；拉起者被强杀 → 管道断裂 → 后端 EPIPE 退出。
-     这条耦合现在是**被测试锁住的行为**，而不是意外事故。
-   - `detach: true`：`detached` 新进程组 + `stdio` 落 `logFile`（没配就 ignore）+ `unref()`，
-     `child` 置空，`dispose()` 明确不碰它（只打一行 info 说明保留 PID）。
-   测试 `[12/12]` 用桩"后端"（监听 `PORT` + 每 120ms 写心跳）分别验证：detach 下包装进程退出后
-   `GET /health` 仍通；托管下它必然死掉。断言失败信息里写明"说明 stdio 选择逻辑变了，请同步 README"。
-   顺带修掉一个真 bug：detach 下 `child` 故意为 null，`ensure()` 的就绪轮询原来按 `child === null`
-   判"进程已退出"，会把主动解耦误报成启动失败——现在按 PID 存活判断。
-3. **可诊断性**：`manager.pid()` 暴露 PID；拉起时 `logger.info` 打 `PID=… 模式=托管|detach`；
-   回收时打 `method=taskkill ok=true/false`；日志目录不存在会先建（`writeLogFile` 与 detach fd 都补了 `mkdirSync`）。
-4. **有意不做**（避免误伤，留作后续）：
-   - **不自动回收陈旧 PID 文件里的进程**。理由是 Windows 上 PID 会被复用，且当前 8787 上很可能就是
-     用户手工起的 `node dist/index.js start`——按一个残留 PID 去 `taskkill /T` 有可能杀掉无关进程。
-     要做也得先校验命令行与端口再动，收益不抵风险。
-   - **不杀"不是自己起的" Chrome**。复用已有 Chrome 是后端的既有设计（保住登录态与 CDP 会话），
-     插件只负责自己那条进程树。
-
-5. **环境变量白名单（P2-2）**：新增 `buildChildEnv(source, {inject, extraKeys})`，只放行
-   `ENV_BASE_ALLOWLIST`（PATH/PATHEXT/SYSTEMROOT/WINDIR/COMSPEC/USERPROFILE/APPDATA/LOCALAPPDATA/
-   PROGRAMFILES/TEMP/HOME/TZ/LANG…，跑 Node 与 Chrome 够用，按反代 `src/config/env.ts` 实际读取项核对过）
-   + `DS_` 命名空间（后端自己声明的 `DS_DATA_DIR`/`DS_AUTH_FILE`/`DS_CDP`/`DS_CHROME_PATH`/`DS_DEBUG`/`DS_POW_JS`…）
-   + 插件显式 `inject`（`PORT`/`DS_TOOL_REASONING`/`DS_TOOLS`，优先级最高）+ `opts.env`。
-   其余（`npm_config_*`、`VIRTUAL_ENV`、`PYTHONPATH`、别的插件的 `CAMOFOX_PORT`、`DEEPSEEK_API_KEY`）一律不进子进程。
-   额外收益：宿主的 `HOST=0.0.0.0` 也不再能把反代从"只绑回环"变成监听全网卡——smoke `[13/14]` 专门断言了这一点，
-   并断言白名单里没有未登记项、`passEnvKeys` 点名才放行。逃生口是 `passEnvKeys`（只写变量名）与 `opts.env`。
-   拉起时 `logger.debug` 打印**放行后的变量名清单**（不打印值），渗不透也看得见。
-6. **API Key 解析（P2-3）**：`resolveApiKey(opts, logger)` 保持"配置 → `DS_API_KEY` → `data/.api-key`"优先级，
-   改为**按 mtime 缓存**（一次 13 步会话不再同步读盘 13 次），mtime 前进就重读；
-   文件或内容为空时给**一次性**可操作告警（指出三个来源与 `pnpm login`），任何日志都不回显密钥本体。
-   smoke `[14/14]` 用 `utimesSync` 把 mtime 钉到整秒时间戳，分别证明"mtime 不变不重读""mtime 前进必须见新值"
-   "缺失只 warn 一次""空文件同样告警""告警里不含 sk-"。本段临时摘掉宿主 `DS_API_KEY` 并在 finally 复原，保证与调用环境无关。
-
-**真机闭环复验（2026-10-20 20:43，`test/live_e2e.mjs` detach 模式）**：先把旧后端按树回收停掉
-（`taskkill` 连带收掉 conhost，Chrome 13136 不在我们树里 → 保留，登录态不丢），再让插件按新规则重拉：
-
-```
-[debug] 子进程环境变量（只记名不记值）: APPDATA, COMSPEC, DS_TOOLS, DS_TOOL_REASONING, HOME, HOMEDRIVE,
-        HOMEPATH, LANG, LC_ALL, LOCALAPPDATA, PATH, PATHEXT, PORT, PROGRAMFILES, PROGRAMFILES(X86),
-        PROGRAMW6432, SYSTEMDRIVE, SYSTEMROOT, TEMP, TMP, USERPROFILE, WINDIR
-[info]  已拉起后端 PID=11280 模式=detach
-[debug] 后端自述 version=0.1.0 toolReasoning=clean toolCalls=text → mismatches=0
-[debug] model=deepseek-web-thinking ms=3258 ttft=2815ms reasonChars=122 contentChars=0
-        toolCalls=1 usage=0/671 conversation=efa7d9b9-… outcome=tool-calls
-```
-
-要点：白名单下真实后端**照常干活**——复用 `data/auth.json` 登录态（日志明写"无需打开浏览器"）、
-连回 CDP 9333、`pwsh` 调用参数完整、28 段推理实时下发、`usage` 单块且 671 为上游真实计数。
-`DS_API_KEY` 没透传，后端回落到 `data/.api-key`（横幅里只打 `{"count":1,"source":"file"}`，不含密钥值），
-与插件侧解析的是同一份，认证一致。脚本退出后 `ppid=20976 已退出 → 后端独立存活`，detach 语义成立。
-
-**P2 剩下的**：P2-4（绝对路径硬编码三处）、P2-6（改配置要重启）。P2-1/P2-8 本批已修，P2-5 属有意设计已关闭。
-
-
-
-## 附:P1 落地记录(本轮第二批,含真机复验)
-
-1. **P1-1 工具调用按 `index` 累积**:改为 `Map<index,{id,name,args}>` 收分片,流收尾时统一
-   `block-start → tool-call-delta → block-end` 整块下发;缺 id 用 `call_dsh_<ts>_<seq>` 自增兜底。
-   smoke `[8/12]` 两个用例:同 index 分两片合成一个完整 `{"command":"ls"}`;一个 chunk 两个调用各自成块且 id 不撞。
-2. **P1-4 探活缓存 + 空闲超时**:`/health` 结果按 `healthTtlMs`(默认 30s)缓存,`ensure()` 命中缓存不再发请求
-   (smoke `[9/12]` 断言三次 ensure 只打一次 `/health`);读流用 `Promise.race` 包一层 `streamIdleTimeoutMs`
-   (默认 120s),超时抛 `failureCode:'TIMEOUT'` → 归一为可重试的 `TIMEOUT`,不再永久挂着(smoke 实测 300ms 触发)。
-3. **P1-6 后端可辨识**:`/health` 现在回 `version/toolReasoning/toolCalls/authReady/authAgeMs`
-   (反代侧新增 `src/server/health.ts`,每次现读);插件 `diffHealth()` 比对自身配置,
-   旧构建或开关不一致就 `logger.warn`(不阻断,复用可能有意为之)。
-   真机复验:插件自己 spawn 新 dist 后拿到 `{version:"0.1.0",toolReasoning:"clean",toolCalls:"text",authReady:true,authAgeMs:1315711}`,
-   `mismatches=0`;这条恰好把 P1-6 当初的疑点关掉了——现在能证明当时跑的到底是哪套配置。
-4. **P1-7 每轮一行统计**:`logger.debug` 打 `model/ms/ttft/reasonChars/contentChars/toolCalls/usage/conversation/outcome`,
-   失败路径按 warn。真机实测:`ms=4482 ttft=4019ms reasonChars=215 toolCalls=1 usage=0/671 outcome=tool-calls`,
-   其中 `671` 是上游真实累计输出 token(不再是字符估算),`conversation` 可拿去反查网页会话血缘。
-5. **P1-8 日志落盘**:`logFile` 配置后子进程输出按行追加(带 ISO 时间戳),超 2MB 轮转 `.1`;
-   内存环形缓冲从 50 行提到 200 行。真机复验:跑完一轮日志文件 7 行。
-6. **P1-5 补完**:错误/提前 return 路径统一走 `closeOpenBlock()`,smoke 断言 `block-start` 与 `block-end` 数量相等。
-
-**P1 剩下的两条(都需要设计取舍,没动)**:
-- **P1-2 工具回合正文仍全量缓冲**:实测 `write` 那种 38474 字符的大参数回合,界面 75s 只见思考不见正文。
-  反代已有 `ProtocolTextGate` 只扣"可能是标记开头"的尾巴,理论可接上增量下发,但要重新论证
-  "半截协议永不外泄"这条不变量,并补跨 chunk 切断标记的用例——是设计变更,不是补丁。
-- **P1-3 泄漏闸门前移到 text-delta**:现在泄漏仍要在流末尾才发现(先给用户看脏文本,再重试一轮)。
-  另:检测口径目前只硬扫 `｜DSML｜` 与 `tool_call` 两族标记,反代侧新协议形态若再变,这里要同步。
-
-
-
-## 附:本次真机会话原始数据(便于复查)
-
-- 会话:`session-969ec5e0-85de-47ea-b01a-a0799cbacf37`,turn 1,13 步,总时长 169565ms,`reason=completed`。
-- 工具调用序列:`web_search` → `web_fetch` → `web_search` → `web_search` → `write`(38474 字符)
-  → `read`×3 → `camofox`(失败)→ `pwsh` → `camofox`(失败)→ `pwsh`×2,参数全部完整。
-- 每步耗时:6650 / 9261 / 7391 / **75602** / 6509 / 2073 / 4217 / 6541 / 11226 / 17157 / 5620 / 5628 / 11252 ms。
-- 每步推理字符:273 / 2093 / 948 / 23874 / 1824 / 155 / 383 / 365 / 3589 / 805 / 1526 / 516 / 839。
-- 正文:仅第 12 步 34 字符、第 13 步 1220 字符(其余为纯工具回合),**无协议残留**。
-- 请求规模:system 17235 字符;52 个工具 schema 50553 字符;本轮工具结果累计 57628 字符。
-- 后端进程:8787 → PID 11192(手工启动,`node dist/index.js start`);9333 → Chrome PID 13136(父进程 19508 已死)。
-- 流式探针(单工具、极简提示):推理 22 段自 +3940ms 起,`tool_calls` 与 `finish_reason` 同在 +4297ms,
-  `usage=null`,`conversation=4a9cdaf8-310f-4f54-9ae0-b52febf862d8`。
-
-## 附:P0 落地记录(本轮已修,含验证口径)
-
-代码分布:反代 `git-repo/deepseek-web-api`(usage 那半边)+ 本插件 `lib/openai.js`(新)、`lib/kernel.js`(新)、`lib/provider.js`。
-
-1. **P0-1 usage**
-   - 反代:`stream_options.include_usage` 为真时,最后一个 chunk 挂 `usage`(上游 `accumulated_token_usage` →
-     `completion_tokens`/`total_tokens`,`prompt_tokens` 保持 0);不开启时行为与之前完全一致。plain 与 tool 两条流式路径都覆盖,
-     工具重试后报的是真正下发那一次的计数。
-   - 插件:请求体固定带 `stream_options:{include_usage:true}`;usage 只记录不即时下发,**整轮只发一个 usage 块**
-     (内核 `addUsage` 会把多个 usage 块相加,重复发=重复计费)。
-   - 输出口径:有真实值就用真实值;输入口径上游永远不报,所以**始终按真正上线的载荷估算**
-     (`system + 历史 + 工具 schema` 的 JSON),估算函数改为 CJK 1 字符 1 token、其余 4 字符 1 token(旧的一律 /3)。
-   - 验证:smoke `[5/12]` 与 `[6/12]` 断言"真实 usage 存在 → 恰好 1 个 usage 块且等于 `{12,25}`"、
-     "无 usage → 输入估算 > 10(证明 system/tools 已计入)且输出等于 `estimateTokens(正文)`"。
-2. **P0-2 工具描述**:默认完整透传;新增 `toolDescriptionMaxChars`(默认 0=不裁剪,>0 才裁并加省略号)。
-   smoke 断言上线请求体里 `tools[0].function.description` 等于原始多行文本。
-3. **P0-3 maxTokens**:默认值 8192 → **32768**,并在 README/patch 注释里写明"上游不强制,仅用于向 DSH 申报单轮输出预留
-   (内核 `reservedCompletionTokens` 按它留水位)";DSH 传来的 `options.maxTokens` 现在会透传成 `max_tokens`(反代记录但不强制)。
-   `preparecall_regression` 实测真实 LlmRuntime 的 `config.maxTokens` 已变成 32768。
-4. **P0-4 中止**:读流循环检查 `signal.aborted`;所有异常统一走 `transportFailure()`,
-   `signal.aborted` 或 `AbortError` → `kind:'aborted'` + `ABORTED`(不在 `retryableCodes` 里);`finally` 里 `reader.cancel()` 释放连接。
-   smoke 用"挂住不结束的响应 + 80ms 后 abort"实测到 `aborted`。
-5. **P0-5 错误码**:新增 `failureCodeForStatus()` 对齐内核词表 —— 401/403 `AUTH`、402 `QUOTA`、429 `RATE_LIMIT`、
-   400/413/422 `INVALID_REQUEST`、命中上下文超长措辞 `CONTEXT_WINDOW_EXCEEDED`、5xx `SERVER`、其余 `HTTP_<status>`;
-   `failure` 带 `status`,429 透传 `Retry-After` 为 `providerRetryAfterMs`。
-   `retryableCodes` 收敛为 `EMPTY_RESPONSE / RATE_LIMIT / SERVER / TIMEOUT / TRANSPORT / PROTOCOL_LEAK`,
-   smoke 显式断言 `AUTH/QUOTA/INVALID_REQUEST/CONTEXT_WINDOW_EXCEEDED` **不在**其中。
-6. **P0-6 消息保真**:`system`/`developer` 角色一律透传,未知角色告警后跳过(不再静默吞);
-   缺失 `id` 的工具调用改用自增兜底 id(`call_dsh_N`),避免同一毫秒撞号。smoke 断言角色序列与两条兜底 id 不相同。
-7. **P0-7 非文本 block**:`collectText()` 返回 `{text, skipped}`,图片等被丢弃的 block 类型会通过 `ctx.logger.warn`
-   明确告警(网页反代只支持纯文本);`inputModalities` 仍为 `['text']`,如实申报。
-8. **P0-8(审计时新发现)归因头**:适配器契约要求"每个 provider HTTP 请求都带 `attributionHeaders()`",旧实现完全没带。
-   新增 `lib/kernel.js` 接缝(全插件唯一允许 import `@deepseek-ai/*` 的地方,惰性 + 缓存 + 字面量兜底,
-   与 `dsh-our-free-model/adapter/kernel.js` 同一套做法)。smoke 从 mock server 侧断言上线请求确实带 `user-agent`。
-9. **顺手修掉 P1-5 的一半**:错误/提前 return 路径现在也会补 `block-end`(`closeOpenBlock()`),
-   smoke 用"流中途报错"断言 `block-start` 与 `block-end` 数量相等;索引分配收敛成一个 `nextIndex()` 仍待做。
-10. **顺手加固(原 bug 同类)**:整轮零产出(无正文、无思考、无调用)不再静默 `stop`,改报 `EMPTY_RESPONSE`
-    交给内核重试;协议残留检测同时覆盖"只有推理、推理里全是协议标记"的形态。
-11. **思考开关**:`resolveThinkingEnabled()` 改为查 `KNOWN_MODELS.thinking`,只有未知模型才回退到名字匹配
-    (旧的 `model.includes('pro')` 会把任何带 pro 字样的模型误开思考)。
-
-**真机验证(`test/live_e2e.mjs`,2026-10-20 19:15)**:这次是**插件自己 spawn 后端**(PID 由 `createBackendManager` 拉起,
-`isRunning=true`),P1-6 里"env 注入路径从未被真机执行过"的疑点已消除。一次真实工具回合:
-首个推理增量 +2676ms、35 段推理增量实时下发(证明 `DS_TOOL_REASONING=clean` 生效)、
-结构化 `pwsh` 调用参数完整、正文无协议残留、`finish=tool-calls`、总耗时 3058ms;
-`usage` 恰好一个块 `{inputTokens:116, outputTokens:673}` —— 673 是上游真实累计输出 token(不再是字符估算),
-116 是输入估算(上游 `prompt_tokens` 恒为 0,只能估)。
-另:`preparecall_regression` 实测真实 LlmRuntime 的 `config.maxTokens` 已从 8192 变为 32768。
-
-**仍未做(P1 起)**:tool_calls 按 `index` 累积、工具回合正文增量下发、探活缓存与请求级超时、
-泄漏闸门前移、`/health` 版本与配置回显、插件侧每轮日志、日志落盘。
-
-
-
-- [x] 反代支持 DSML 解析并与文本协议按文档顺序合并(`dsmlCalls.ts` / `toolCalls.ts`)。
-- [x] 不完整协议片段不再被当作可信调用:标记 `protocolTruncated` 并触发后端重试(`toolOutcome.ts`)。
-- [x] 工具回合的推理增量实时下发(`DS_TOOL_REASONING=clean` + `toolStream.ts#ProtocolTextGate`)。
-- [x] 插件侧泄漏兜底 `PROTOCOL_LEAK` 进 `retryableCodes`,并注入 `DS_TOOL_REASONING`/`DS_TOOLS`。
-- [x] `profiles/desktop/cordis.patch.yml` 增补 `toolReasoning: 'clean'` / `tools: 'text'` 并已 `sync-profiles.py` 同步。
-- [x] smoke `[5/5]` 两例 + 真实 DSH `prepareCall` 回归通过;运行时镜像与源一致。
-
-## 附:P2-6 落地记录(配置改动免重启)
-
-先确认内核到底给什么，再决定怎么写——`LlmAdapter` 基类对 `prepareCall` 的原话是:
-"Bind exact model metadata and the eventual request dispatch to one adapter generation.
-Dynamic adapters override this so settings changes between preparation and dispatch
-cannot combine one generation's ... with another's." 即**每轮请求都会走 `prepareCall`**,
-并且明确要求"代际"不能混用。据此:
-
-1. 适配器构造不再固化配置: 收 `source`(对象或返回配置的函数),`_read()` 每次现合并 `DEFAULTS`。
-   `apply()` 传的是闭包 `() => config`,宿主原地更新配置对象时下一轮自然取到新值。
-2. `current()` 是唯一的取用点,并区分两类键:
-   - 只影响请求的(`toolDescriptionMaxChars`/`defaultMaxTokens`/`maxContextWindow`/`strictBackend` 之外那批)→ 直接生效;
-   - 影响后端进程的(`MANAGER_KEYS`: baseUrl/serverDir/pointerFile/nodePath/autoStart/startTimeoutMs/
-     healthTtlMs/toolReasoning/tools/logFile/detach/killTreeOnDispose/passEnvKeys/env/requiredCapabilities/minBackendVersion)
-     → 指纹变化才 `dispose()` 旧管理器并重建,纯请求侧改动不付"杀进程重启"的代价。
-3. `prepareCall` 里读当代 opts、取当代 manager,并把两者一起绑进本轮 `stream(model, options, opts, manager)`;
-   `stream` 不再读 `this.opts`/`this._manager`,所以"准备完之后配置被改"不会影响已在飞的这一轮。
-4. `apply()` 返回 adapter 句柄,`ctx.on('dispose')` 调 `adapter.dispose()` 回收**懒建**的管理器
-   (管理器改成懒建,不再在加载时就 spawn 探测);`ensureManager()` 负责"要用了才建"。
-5. 诚实边界: 若宿主既不原地更新配置对象、也不重新装配插件,任何插件都做不到免重启——
-   这一点写在 README 第 19 条的语义里("每轮请求取当代配置"),而不是空头承诺"热更新"。
-   验证口径是"同实例中途改配置对象"能立刻影响下一轮(smoke `[18/18]`)。
-
-smoke `[18/18]` 断言四件事: 改 `defaultMaxTokens` 后 `resolveModel` 立即反映新值且**没有**重建管理器;
-改 `baseUrl` 后旧管理器被 dispose、新管理器建出来;代际隔离(准备完之后把配置改成死地址,本轮仍走准备时那一代
-并成功完成);`apply()` 返回句柄且 `dispose()` 能清掉懒建管理器。跑起来能看到
-`配置里与后端进程相关的项已变更,重建后端管理器` 这条日志,证明重建路径真被走到。
-
-## 附:P3-5 落地记录(文档三件事)
-
-新增两份文档,README 底部有入口:
-
-- `docs/protocols.md` —— ① 双协议为什么并存(DSH 只发原生 function 形态、网页私有接口没有 function 通道,
-  只能把工具表写进 prompt;模型又会自顾自吐 DSML)、两种形态各由谁解析、
-  ② 工具回合正文为何缓冲(三条理由,含"脏文本进 UI 后重试会留双份内容"这条用户可见代价)、
-  ③ 不完整载荷为何判不可用(真机产生过 `write` 空调用)、④ 为何不信版本号(真机反例: 旧 dist 自述 0.2.0 无 capabilities)。
-- `docs/troubleshooting.md` —— 一分钟取清单(含 zstd 会话日志怎么解)、症状→看哪里→判定 的表、
-  ② `PROTOCOL_LEAK`/`BACKEND_STALE`/`EMPTY_RESPONSE`/`ABORTED`/`TIMEOUT`/`AUTH` 的用户可见表现与含义、
-  ③ 明确标出两类**不属于本插件**的真机失败(camofox `HTTP 500 ENOENT` 与 `HTTP 400 Blocked URL scheme: file:`)
-  并给出区分办法(本插件的错都带稳定错误码的 `finish`;工具自己的错走 `tool/result`),最后是换机器必查项。
-
-写作口径固定为"新机器上也能照着敲":每条都给具体文件路径或可执行命令,不写"检查配置是否正确"这类空话。
-
-**TODO 已清空的部分**: P0 全 8 条、P1-1/2/3/4/5/6/7/8、P2-1/2/3/4/5(有意设计)/6/7、P3-1/2/3/4/5。
-P1-2 与 P1-3 的闸门是同一条改动:反代正文接上 `ProtocolTextGate`(只扣不回)+ 只补发未Seen 的尾巴,
-`streamContent: 'live'` 开启,默认 `buffered` 保持原有保真语义 —— 设计变更已按窄版本落地并真机验证。
-
+1. **DSH 会话转录解码**：`~/.dsh/sessions/--C-Users-Admin-DeepSeek-Harness--/session-<uuid>/session.v4.jsonl.zstd`
+   —— **每条记录是一个独立 zstd 帧**（magic `28 b5 2f fd`）。对整文件调 Node 的 `zlib.zstdDecompressSync` 只会拿到第一条（214 字节的 session 头），
+   必须按 magic 切帧逐帧解；切到"下一帧起点"偶尔会截断该帧，把切片末尾加宽 1–8MB 重试（本轮 1283 帧 → 2358 条记录全解出）。
+   文件是活的，读到 ENOENT 多半撞上重写，先 `cp` 快照再解。
+   ⚠ `docs/troubleshooting.md` 里"一分钟取清单"那条 zstd 说明要按此更正——整文件解只得到头部，极易被误判成"这个会话是空的"。
+2. **区分真错误与关键词噪声**：只看 `isError:true` / 正文以 `Error:` 开头 / 含 `Traceback`。宽泛正则（`error|404|failed`）会捞出 88% 的正常结果
+   —— 本轮踩过一次，差点据此得出"那次任务有 88 处失败"的结论（真实只有 6 处，其中只有 P0-A2 那条伤到了本插件）。
+3. **内核侧事实靠直读 `app.asar`**（182MB 二进制 grep；本轮有效的检索词：`textOnlyImageText`、`accepts text only`、`INVALID_MODEL_CONTEXT`、
+   `does not declare image input`、`detachedModalities`）。别再猜 `LlmAdapter` 契约 —— 上一轮就是因为猜，把 `defaultMaxTokens`（预留）当成真实上限写进了文档。
+4. 插件日志 `~/.dsh/logs/deepseek-web-api.log` 时间戳是 **UTC**（本地 = +8），与会话对齐时先换算。
