@@ -147,10 +147,15 @@
    smoke 断言指引三要素（无图像输入 / 路径 / 下一步）与告警带出文件名+attachment id。
    `docs/troubleshooting.md` 加了"文字优先"一行：真机里救场的是 `…/oauth-authorize?user_code=XXXX` 这行文字，不是像素解码；
    本机没有任何图像解码库，**纯像素解码属未验证路径**，也不许为此给插件加依赖（CI 有零依赖断言）。
-3. **P0-A3③ 结论（不做）**：上游附件通路在本项目血脉里就不存在 —— 反代 `src/deepseek/completion.ts:44` 发 `"ref_file_ids": []`，
-   `SPEC.md:73` 把同一个空数组写进请求契约，vendored 参考实现 `_reference/server.mjs` 全文只有这一处、**没有任何上传路径**，
-   `docs/api.md` 的 Not supported 第一条就是它。要支持需要逆向了私有上传接口（鉴权 + 文件对象结构 + 会话血缘），
-   属独立立项，需要授权与专门验证；本轮不动。
+3. **P0-A3③ 结论（维持 Not supported，但理由已更新）**：~~上游附件通路在本项目血脉里就不存在~~ —— **该结论已被 2026-10-21 的 spike 推翻**。
+   实测：真人扫码登录 DeepSeek Web 后，`POST /api/v0/file/upload_file`（multipart + `x-ds-pow-response`）上传成功，
+   返回 `data.biz_data.id`；把该 id 放进 `ref_file_ids` 调 `/api/v0/chat/completion`，模型正确答出图片内容（问颜色 → 答"绿色"）。
+   `client/settings` 的 `file_feature` 声明 50 文件 / 100 MiB / 1000 种后缀 / vision=true。
+   完整契约表：反代仓 `docs/spike-file-upload-contract.md`（`main` 分支），探测脚本在 `spike/ref-file-upload` 分支（本地未推）。
+   **仍然不做**的理由从"上游没有"改为"反代侧缺的是产品工作"：无 `image_url`→`ref_file_ids` 输入通道、
+   大二进制要穿过我们的 HTTP 层（`readJsonBody` 1MB 上限比上游 100 MiB 更紧）、会话血缘按 prompt 指纹复用会与附件脱节。
+   注意**别把这份实测当成"可以顺手谎报 `inputModalities`"**：内核有 `does not declare image input` 独立校验，
+   在真做出输入通道之前，`['text']` 仍须如实申报。
 4. **P0-B2 空回合出真错误码**：
    - 反代 `src/deepseek/streamWatch.ts` 新增 `emptyUpstreamFailure(evidence, promptChars)`：`upstream-silent` → `HttpError(504)`、
      `upstream-not-started` → `HttpError(502)`、`parser-dropped-content` → **返回 null**（那是我们的解析漏了，说成"上游不可用"会让人白重试）。
