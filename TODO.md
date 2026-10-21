@@ -176,3 +176,25 @@
    504 空回合被判成**不可重试**的 `CONTEXT_WINDOW_EXCEEDED` —— 否定一句诊断语也一样会触发正则。**仍缺的验证**：真实空回合样本（`emptyVerdict` 上线后还没有一条），
    以及后端仓 GitHub Actions 对 `main` 的 push **没有触发任何 run**（`a409146`/`71db820`/`168c46e` 都查不到，属既有状态，非本轮引入）。
 
+6. **P0-A3③ 全链路落地（2026-10-21 下午，推翻上面第 3 条的"仍然不做"）**：**图片输入已端到端打通并上线。**
+   - **反代侧**（`banyeshuiwujiao/deepseek-web-api`，PR #1 `53d50cd` / #2 `01bdc1a` / #3 `626dc44` / 修复 `a58c47d`）：
+     `src/deepseek/fileUpload.ts`（multipart+PoW 上传 + fetch_files 轮询）、`attachments.ts`+`attachmentTypes.ts`
+     （image_url/input_file/input_image 提取、data URL 解码、扩展名白名单、12 MiB 预检）、`attachmentRunner.ts`
+     （每图独立 PoW、等 PARSING→SUCCESS 才用 id——**真实环境抓到的 bug：不等就绪上游回空 channels**）、
+     `pow.ts` 的 `targetPath`/`createSession` 参数化、completion body 上限 1→16 MiB、
+     `MessageTurn.attachmentCount` 进会话指纹（`remember()` 曾丢字段 + `resolveHistory` 模糊兜底曾忽略附件，
+     两处都是测试抓的）、`DS_FILE_UPLOAD=off` 总开关。契约表：反代仓 `docs/spike-file-upload-contract.md`。
+   - **插件侧**（本仓 PR #1 `0f871f0`）：`inputModalities` → `['text','image']`。
+     **内核事实（app.asar 实证）**：申报 image 后 `LlmRuntime` 原样传 image block，但 block 只有元数据
+     （`attachmentId`/`mediaType`/尺寸），字节在内容寻址存储里——**文档化布局**
+     `<DSH_HOME>/attachments/v1/objects/<sha256前2位>/<sha256>`（文件名==内容 sha256，本机抽样 Get-FileHash 相等、
+     magic bytes 即 PNG/JPEG 头）。新 `lib/attachments.js` 按布局读盘 → magic 校验 → data URL；
+     任何失败返回 null 回落占位符+告警（温和失效，不引入硬依赖）。`formatOpenAiMessages` 改 async。
+     ~~inject `ctx.attachments`~~ 方案已否决（服务缺失=插件永不激活，且属未文档化内部 API）。
+   - **端到端验证（17:1x）**：客户端重启加载新插件后，`read_image` 读 64x64 洋红底白 Z 验证图
+     （`sha256:4b04e564…`）→ 本会话模型直接看到并答出颜色与字母 —— **read_image→内核→插件→反代→上传→上游视觉**全通。
+     反代侧脚本：`scripts/verify-{image-path,pr-b-regressions}.mjs` + `make-verify-image.mjs`（可重复跑）。
+   - **基线**：反代 224 用例 / 插件 smoke 18 段 + config_check + prepareCall 全绿；两仓 main 均已推送。
+   - **遗留**：`imageOmissionHint` 仍会对内核生成的占位符触发（tool 结果场景），语义仍正确；`ref_file_ids` 上传的
+     测试文件/会话在真实账号里有残留（spike 期已删会话，文件对象仍在账号里，属账号侧垃圾）；`emptyVerdict` 零样本欠账不变。
+
