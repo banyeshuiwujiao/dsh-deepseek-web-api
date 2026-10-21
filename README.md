@@ -99,7 +99,7 @@ cd C:\Users\Admin\DeepSeek_Harness\dsh-client-config\plugins\dsh-deepseek-web-ap
         # 需要指明时可以写 ~ 前缀：serverDir: '~/DeepSeek_Harness/git-repo/deepseek-web-api'
         autoStart: true
         startTimeoutMs: 60000
-        maxContextWindow: 576000      # 上游实测约 1M token；576000 是中文会话压缩线不越顶的最紧一档
+        maxContextWindow: 560000      # 上游实测约 1M token；560000 给中文会话留约 3% 压缩余量
         defaultMaxTokens: 32768     # 申报给 DSH 的单轮输出预留（上游不强制 max_tokens）
         toolDescriptionMaxChars: 0  # 0 = 工具描述完整下发；>0 才按字符预算裁剪
         toolReasoning: 'clean'   # 注入后端 DS_TOOL_REASONING：clean 才能实时流式深度思考
@@ -124,8 +124,9 @@ cd C:\Users\Admin\DeepSeek_Harness\dsh-client-config\plugins\dsh-deepseek-web-ap
 > （1,850,168 中文字符 = 957,921 token 仍完整召回，1,900,163 字符起静默空回合），但
 > `dsh-compaction-basic` 的触发式是 `threshold = min(0.8W, W − defaultMaxTokens − 65536)`，
 > 而它的 tokenMeter 按「4 字符 ≈ 1 token」估算——中文实际约 0.518 token/字，估算只有真实用量的一半。
-> 于是 576000 会在真实约 95.5 万 token 时压缩（贴着 95.8 万的实测上限，余量约 0.3%），
-> 512000 是留 11% 余量的保守档，640000 要到真实约 106 万才动手——先撞空回合，压缩永远来不及。
+> 于是 560000 会在真实约 92.8 万 token 时压缩（95.8 万实测上限之内，留约 3% 余量），
+> 576000 是吃满的一档（真实约 95.5 万，余量只剩 0.3%），512000 留 11% 余量，
+> 640000 要到真实约 106 万才动手——先撞空回合，压缩永远来不及。
 > 中文会话算出来的安全上界是 577,900；旧的 128000 之所以像"上下文很小就被压掉"，是因为它的阈值只有
 > 29,696 估算 token ≈ 6.2 万真实 token。复算工具是运维目录里的 `~/DeepSeek_Harness/probes/kernel_threshold.mjs`
 > （它 eval 安装包里的公式原文，不重写公式；该目录未纳入版本管理）。
