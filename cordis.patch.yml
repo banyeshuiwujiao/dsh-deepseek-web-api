@@ -3,12 +3,22 @@
 # ============================================================================
 # 注意：仅作为 provider 路由接入模型选择器，不加入工具列表。
 #
+# 本文件是**本插件自带的 bundle patch**（package.json 的
+# dsh.bundle.patch 指向它）。它随插件一起被 DSH 读取：
+#
+#   · 启用/停用 = profile 的 dsh.profile.bundles 里有没有 dsh-deepseek-web-api
+#     （插件页「已安装插件」右侧的开关改的就是那个列表）；
+#   · 本文件里的 config 是插件的**可移植默认值**。profile 的
+#     cordis.patch.yml 可以按 id 覆盖它（覆盖是整块替换，必须列全所有键）。
+#
 # 接入步骤：
-#   1. 执行 .\install.ps1 同步插件到 ~/.dsh/profiles/desktop/node_modules/dsh-deepseek-web-api
-#      （install.ps1 会把本机后端目录写进指针 ~/.dsh/deepseek-web-api.json，所以这里不用写绝对路径）
-#   2. 把下方 insert 块合进权威源 dsh-client-config\profiles\desktop\cordis.patch.yml
-#   3. 执行 python scripts\sync-profiles.py --profile desktop
-#   4. 重启 DeepSeek Harness.exe
+#   1. 执行 .\install.ps1（把本机后端目录写进指针 ~/.dsh/deepseek-web-api.json，
+#      并校验 ~/.dsh/profiles/desktop/node_modules/dsh-deepseek-web-api 是 junction）
+#   2. 确认 profile 的 dsh.profile.bundles 里列了 dsh-deepseek-web-api
+#      （dsh plugin --profile desktop add link:<本目录> 会自动加）
+#   3. 重启 DeepSeek Harness.exe
+#
+# 停用本插件不会留下悬空的 provider 行：整段 insert 随 bundle 一起退出组合。
 # ============================================================================
 
 - insert:
@@ -23,17 +33,30 @@
         # serverDir: '~/DeepSeek_Harness/git-repo/deepseek-web-api'
         autoStart: true
         startTimeoutMs: 60000
-        maxContextWindow: 128000
-        # 上游网页端不接受 max_tokens，这个值只是向 DSH 申报单轮输出预留（内核 reservedCompletionTokens）。
+        # 2026-10-21 实测：128K 只是自报值，反代与上游都没有这道闸门。
+        # 上游真实窗口（逐档打点，随机暗号埋在 2%/25%/50%/75%/98%，模型 deepseek-v4-flash）：
+        #   1,850,168 中文字符 = 上游累计 957,921 token 仍 5/5 命中；1,900,163 字符起变成静默空回合。
+        #   即真实上限 ≈ 1M token，与 V4 官方规格一致；这批中文换算比稳定在 0.518 token/字。
+        # 为什么是 560000：这个值不是模型能力，而是内核压缩线的输入。dsh-compaction-basic 的公式是
+        #   threshold = min(0.8W, W - defaultMaxTokens - 65536)，而它的 tokenMeter 按「4 字符≈1 token」估算，
+        #   对中文只有一半准。560000 → 阈值 448,000 估算 token = 179.2 万字符 = 真实约 92.8 万 token，
+        #   在实测上限 95.8 万之内并留约 3% 余量。576000 是吃满的一档（真实约 95.5 万，余量只剩 0.3%）；
+        #   640000 会让压缩到真实约 106 万 token 才动手，等于永远赶不上静默空回合。
+        #   中文会话算出来的安全上界是 577,900，512000 是留 11% 余量的保守档。
+        #   旧的 128000 才是"上下文很小就被压掉"的真因：阈值只有 29,696 估算 token ≈ 6.2 万真实 token。
+        #   换算法与复算工具见插件 README 与反代 docs/api.md 的「Measured context ceiling」。
+        maxContextWindow: 560000
+        # 上游网页端不接受 max_tokens，这个值只是向 DSH 申报"单轮最多可能吐多少 token"，
+        # 内核按它预留上下文水位；实测单轮可产出 6 万字符（约 2 万 token），8192 会让压缩过于乐观。
         defaultMaxTokens: 32768
-        # 0 = 不裁剪工具描述；>0 时按字符预算裁剪并加省略号。
+        # 0 = 不裁剪工具描述（反代把定义原样注入提示词，裁剪等于让模型看不到）。
         toolDescriptionMaxChars: 0
-        # 拉起后端时注入的环境开关；clean 让深度思考实时流式，tools 选择提示词里的工具协议形态。
+        # clean：工具回合也实时下发深度思考增量；text：沿用 JSON 文本工具协议（两种协议后端都能解析）。
         toolReasoning: 'clean'
         tools: 'text'
-        # 工具回合正文：buffered（默认）等解析完一次下发，最保真；live 让正文实时出字（只扣不回，
-        # 但被判无效的那一轮会重试，重来的答案只追加不上屏，屏幕文字可能与入库消息不同）。
-        streamContent: 'buffered'
+        # live：工具回合正文也走协议闸门实时出字（只扣不回，标记不外泄）。代价是被判无效的那一轮会重试，
+        # 重来的答案只追加不上屏，屏幕文字可能与入库消息不同；要最保真的转写就把这里改回 'buffered'。
+        streamContent: 'live'
         # /health 结果缓存：一次 13 步的会话不必每步都探活一次。0 = 每次都探活。
         healthTtlMs: 30000
         # 上游连续无数据的容忍上限，超时按可重试的 TIMEOUT 中止。0 = 不设上限。
