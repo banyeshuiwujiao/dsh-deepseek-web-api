@@ -26,7 +26,7 @@ const adapter = new mod.DeepSeekWebApiAdapter(
   null,
   { warn: (m) => warns.push(String(m)), info: () => {}, debug: () => {}, error: () => {} },
 );
-const resolved = await adapter.resolveModel(mod.PROVIDER_ID, "deepseek-web-flash");
+const resolved = await adapter.resolveModel(mod.PROVIDER_ID, "deepseek-web-thinking");
 
 console.log(JSON.stringify({
   yamlRaw: { maxContextWindow: rawWindow, defaultMaxTokens: rawTokens },

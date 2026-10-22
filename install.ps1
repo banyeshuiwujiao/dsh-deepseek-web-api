@@ -1,7 +1,10 @@
-# dsh-deepseek-web-api 安装与同步脚本 (幂等)
+# dsh-deepseek-web-api 安装/自检脚本 (幂等)
 #
-# 顺序是故意的：先验配置与测试，再看后端构建，最后才动运行时镜像。
+# 顺序是故意的：先验配置与测试，再看后端构建，最后校验运行时接线。
 # 任何一步失败都立刻停止（$ErrorActionPreference = 'Stop'），不留半成品状态。
+#
+# 第 4 步只做「校验」不复制：运行时通过 profile 的 link: 依赖（junction）直指本目录，
+# 全机只有一份代码。改完代码不需要同步，重启客户端即可生效。
 #
 # 后端目录不再写死在本脚本里：不传 -BackendDir 就交给 lib/paths.js 的解析顺序
 # （环境变量 DSH_DEEPSEEK_WEB_API_DIR → 指针文件 → 插件同级 → home 常见位置），
@@ -103,23 +106,26 @@ if (Test-Path (Join-Path $backendDir '.git')) {
 }
 Write-Host "  后端 git 版本: $backendRev"
 
-Write-Host "[4/5] 同步插件至运行时镜像并校验一致性..."
+Write-Host "[4/5] 校验运行时接线（link 依赖 = junction，全机只有一份代码）..."
+# 2026-10-22 起不再往 node_modules 里拷代码：那等于维护两份副本，改错一份就静默跑旧代码，
+# 而且 pnpm 视手抄目录为 extraneous，每次 `pnpm install` 都会把它挪进 .ignored（当天真删过一次）。
+# 现在 profile 的 package.json 里有 link: 依赖，node_modules/dsh-deepseek-web-api 只是指回本目录的
+# junction——改完即生效（仍需重启客户端才重新加载模块），不需要再同步。
 $dst = Join-Path $env:USERPROFILE '.dsh\profiles\desktop\node_modules\dsh-deepseek-web-api'
-New-Item -ItemType Directory -Force -Path $dst | Out-Null
-Copy-Item -Recurse -Force (Join-Path $src 'lib'), (Join-Path $src 'package.json'), (Join-Path $src 'README.md') $dst
-
-# 逐文件比哈希：半复制/漏复制（比如新加了 lib/*.js 却没同步）都能当场发现。
-$mismatch = @()
-foreach ($rel in @('package.json', 'README.md') + (Get-ChildItem -Path (Join-Path $src 'lib') -Filter *.js | ForEach-Object { "lib/$($_.Name)" })) {
-  $a = Join-Path $src $rel
-  $b = Join-Path $dst $rel
-  if (-not (Test-Path $b)) { $mismatch += "$rel (镜像缺失)"; continue }
-  if ((Get-FileHash $a -Algorithm SHA256).Hash -ne (Get-FileHash $b -Algorithm SHA256).Hash) { $mismatch += $rel }
+$linkSpec = 'dsh-deepseek-web-api@link:' + ($src -replace '\\', '/')
+if (-not (Test-Path $dst)) {
+  throw "运行时未接线（$dst 不存在）。在该 profile 目录执行一次：`n  pnpm add `"$linkSpec`"`n然后重启 DeepSeek Harness.exe。"
 }
-if ($mismatch.Count -gt 0) { throw "运行时镜像与源码不一致: $($mismatch -join ', ')" }
-Write-Host "  已同步并校验一致: $dst"
+$dstItem = Get-Item $dst -Force
+if ($dstItem.LinkType -eq 'Junction' -or $dstItem.LinkType -eq 'SymbolicLink') {
+  if (@($dstItem.Target) -notcontains $src) { throw "接线指向别处：$dst -> $($dstItem.Target)（期望 $src）" }
+  Write-Host "  已接线（$($dstItem.LinkType)）：$dst -> $src"
+} else {
+  # 旧方案留下的实体副本：它会独立于源码漂移，必须显式换成 junction，别默默放行。
+  throw "运行时是实体拷贝而不是 junction（改代码不会生效，pnpm 还会把它当 extraneous 删掉）。修复：`n  Remove-Item -Recurse -Force '$dst'`n  New-Item -ItemType Junction -Path '$dst' -Target '$src'`n或改成正式依赖：pnpm add `"$linkSpec`""
+}
 
 Write-Host "[5/5] 提示: 请确认 dsh-client-config\profiles\desktop\cordis.patch.yml 已包含配置，"
 Write-Host "       再执行 python scripts\sync-profiles.py --profile desktop，"
-Write-Host "       最后重启 DeepSeek Harness.exe。"
+Write-Host "       最后重启 DeepSeek Harness.exe（代码已 live 接线，不再需要拷贝同步）."
 Write-Host "OK: dsh-deepseek-web-api 安装就绪！"

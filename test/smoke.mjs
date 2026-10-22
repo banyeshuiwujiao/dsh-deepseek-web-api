@@ -129,8 +129,9 @@ assert.equal(retryAfterMs('not-a-date'), undefined)
 assert.ok(retryAfterMs(new Date(Date.now() + 5000).toUTCString()) > 3000)
 
 // 深度思考开关查模型表，不再靠 includes('pro') 猜
+// 2026-10-22：deepseek-web-flash（极速模式）已从选择器移除，目录里只剩 thinking 一条，
+// 所以"已知模型 → false"不再有目录内的样本，改由名字回退规则（my-flash-clone）覆盖。
 assert.equal(resolveThinkingEnabled('deepseek-web-thinking'), true)
-assert.equal(resolveThinkingEnabled('deepseek-web-flash'), false)
 assert.equal(resolveThinkingEnabled('deepseek-reasoner'), true)
 assert.equal(resolveThinkingEnabled('my-flash-clone'), false)
 
@@ -185,23 +186,22 @@ assert.ok(Number.isFinite(policy.initialDelayMs) && Number.isFinite(policy.maxDe
 
 console.log('=== [4/18] 模型列表与 resolveModel / prepareCall ===')
 const models = await adapter.listModels(PROVIDER_ID)
-assert.ok(models.length >= 2, '模型列表数量不足')
-assert.ok(models.some((m) => m.id === 'deepseek-web-flash'))
+assert.ok(models.length >= 1, '模型列表数量不足')
 assert.ok(models.some((m) => m.id === 'deepseek-web-thinking'))
 
-const resolved = await adapter.resolveModel(PROVIDER_ID, 'deepseek-web-flash')
-assert.equal(resolved.id, 'deepseek-web-flash')
+const resolved = await adapter.resolveModel(PROVIDER_ID, 'deepseek-web-thinking')
+assert.equal(resolved.id, 'deepseek-web-thinking')
 assert.equal(resolved.provider, PROVIDER_ID)
 assert.ok(resolved.context?.contextWindow > 0)
 // P0-3：申报的输出预留必须大于实测单轮产出（约 2 万 token），不能再用 8192 骗宿主
 assert.ok(resolved.defaultMaxTokens >= 32768, `defaultMaxTokens 太小: ${resolved.defaultMaxTokens}`)
 
-const prepared = await adapter.prepareCall(PROVIDER_ID, 'deepseek-web-flash')
-assert.equal(prepared.model.id, 'deepseek-web-flash')
+const prepared = await adapter.prepareCall(PROVIDER_ID, 'deepseek-web-thinking')
+assert.equal(prepared.model.id, 'deepseek-web-thinking')
 assert.equal(typeof prepared.stream, 'function')
 
 // 已经中止的 signal 不该再发起请求
-await assert.rejects(() => adapter.prepareCall(PROVIDER_ID, 'deepseek-web-flash', { aborted: true }))
+await assert.rejects(() => adapter.prepareCall(PROVIDER_ID, 'deepseek-web-thinking', { aborted: true }))
 
 console.log('=== [5/18] SSE 增量 → DSH StreamChunk（Mock Server）===')
 
@@ -486,7 +486,7 @@ console.log('✅ 中止上报 ABORTED，且不进重试码表')
 // 起点就已中止
 const preAborted = new DeepSeekWebApiAdapter({ baseUrl: 'http://127.0.0.1:1', autoStart: false })
 const preChunks = []
-for await (const chunk of preAborted.stream('deepseek-web-flash', { messages: [], signal: { aborted: true } })) {
+for await (const chunk of preAborted.stream('deepseek-web-thinking', { messages: [], signal: { aborted: true } })) {
   preChunks.push(chunk)
 }
 assert.equal(preChunks[0].reason.kind, 'aborted')
@@ -522,7 +522,7 @@ assert.equal(preChunks[0].reason.kind, 'aborted')
   assert.ok(junkWarns.some((w) => w.includes('maxContextWindow')), '非法值没有留下可定位告警')
   // 同一个非法值每轮都读、每轮都判：告警只许出现一次，否则日志会被刷满
   await junkCfg.resolveModel(PROVIDER_ID, 'deepseek-web-thinking')
-  await junkCfg.resolveModel(PROVIDER_ID, 'deepseek-web-flash')
+  await junkCfg.resolveModel(PROVIDER_ID, 'deepseek-web-thinking')
   assert.equal(junkWarns.filter((w) => w.includes('maxContextWindow')).length, 1, '非法申报值重复告警')
   assert.equal(positiveIntOption('128000', 'maxContextWindow', 128000, () => {}), 128000)
   assert.equal(positiveIntOption(-1, 'maxContextWindow', 128000, () => {}), 128000)
@@ -612,7 +612,7 @@ assert.equal(preChunks[0].reason.kind, 'aborted')
 console.log('=== [7/18] 后端不可用时的错误口径 ===')
 const offline = new DeepSeekWebApiAdapter({ baseUrl: 'http://127.0.0.1:1', autoStart: false })
 const offlineChunks = []
-for await (const chunk of offline.stream('deepseek-web-flash', { messages: [{ role: 'user', content: 'x' }] })) {
+for await (const chunk of offline.stream('deepseek-web-thinking', { messages: [{ role: 'user', content: 'x' }] })) {
   offlineChunks.push(chunk)
 }
 const offlineFinish = offlineChunks.find((c) => c.type === 'finish')

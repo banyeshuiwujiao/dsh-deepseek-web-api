@@ -26,12 +26,12 @@ await withRuntime(async (ctx) => {
     autoStart: false,
   })
   ctx.llm.registerAdapter([PROVIDER_ID], adapter)
-  const prepared = await ctx.llm.prepareCall({ provider: PROVIDER_ID, model: 'deepseek-web-flash' })
+  const prepared = await ctx.llm.prepareCall({ provider: PROVIDER_ID, model: 'deepseek-web-thinking' })
   console.log('真实 DSH LlmRuntime prepareCall 结果:', JSON.stringify({
     config: prepared.config,
     hasStream: typeof prepared.stream === 'function',
   }))
   assert.equal(typeof prepared.stream, 'function')
-  assert.equal(prepared.config.model, 'deepseek-web-flash')
+  assert.equal(prepared.config.model, 'deepseek-web-thinking')
   console.log('✅ 真实 DSH LlmRuntime 集成回归通过')
 })

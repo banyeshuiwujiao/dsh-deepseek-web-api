@@ -11,8 +11,9 @@
 ## 核心特性
 
 1. **直达模型选择器**：通过 `ctx.llm.registerAdapter(['deepseek-web-api'], adapter)` 注册原生 LlmAdapter，在 DSH 模型选择器中直接可选：
-   - `deepseek-web-flash`：DeepSeek 网页版 · 极速模式（关闭深度思考，秒级直接回答）
    - `deepseek-web-thinking`：DeepSeek 网页版 · 深度思考（开启深度思考，输出完整思维链）
+   - 2026-10-22 精简：`deepseek-web-flash`（极速模式）已从选择器移除，后端仍认识该 id。
+     要恢复就从 git 历史里取回那一条（`git log -p -- lib/provider.js`）抄回 `KNOWN_MODELS`。
 2. **免手动启停 (autoStart)**：调用时自动检测 `http://127.0.0.1:8787/health`，若未启动则自动拉起 `git-repo\deepseek-web-api` 后端服务，并在插件卸载或客户端退出时安全释放。
 3. **原生凭据解析**：自动寻找 `data/.api-key`、环境变量 `DS_API_KEY` 或 patch 配置中的 `apiKey`。
 4. **原生流式与思考协议**：无缝映射 OpenAI SSE 增量为 DSH 原生 `StreamChunk`：
@@ -75,9 +76,20 @@
 
 ## 安装与配置
 
-### 1. 同步插件到运行时镜像
+### 1. 接线到运行时（一次性，之后改代码不用再管）
 
-在插件源码目录下运行：
+运行时不再拷贝副本，而是走 profile 的 `link:` 依赖（`node_modules/dsh-deepseek-web-api` 是指回本目录的 junction）：
+
+```powershell
+cd C:\Users\Admin\.dsh\profiles\desktop
+pnpm add "dsh-deepseek-web-api@link:C:/Users/Admin/DeepSeek_Harness/dsh-client-config/plugins/dsh-deepseek-web-api"
+```
+
+`package.json` / `pnpm-lock.yaml` 里应出现同形状的 `link:` 条目（与 `@local/dsh-moodboard-wall` 一致）。
+**为什么不再手抄进 `node_modules`**：手抄的目录在 pnpm 眼里是 extraneous，每次 `pnpm install` 都会被挪进 `.ignored`
+（2026-10-22 真删过一次，整个 provider 组从选择器消失），而且两份副本必然漂移——改错一份就静默跑旧代码。
+
+然后跑一次自检（配置自检 → smoke → 后端探活/指针 → 校验接线确实是指回源码的 junction）：
 
 ```powershell
 cd C:\Users\Admin\DeepSeek_Harness\dsh-client-config\plugins\dsh-deepseek-web-api
@@ -152,7 +164,7 @@ pnpm login
 ### 5. 重启客户端
 
 完全退出 `DeepSeek Harness.exe`（右键托盘完全退出），重新打开客户端。在新建会话顶部的**模型选择器**中即可选择：
-- **DeepSeek Web API (反代)** → `deepseek-web-flash`（极速）/ `deepseek-web-thinking`（深度思考）。
+- **DeepSeek Web API (反代)** → `deepseek-web-thinking`（深度思考）。
 
 ---
 
