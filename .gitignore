@@ -8,6 +8,11 @@ node_modules/
 # Caches
 .cache/
 *.tsbuildinfo
+# pip 装依赖时在仓库根留下的临时目录（pip-build-tracker-*、pip-unpack-* 等）。
+# 它们由 pip 的 TMPDIR 决定，默认落在当前工作目录，装完不总清理干净。
+pip-*/
+__pycache__/
+*.pyc
 
 # OS / editor
 .DS_Store
